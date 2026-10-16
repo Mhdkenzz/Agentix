@@ -20,6 +20,19 @@ export function detectCli(cmd: string): Promise<{ installed: boolean; version?: 
 }
 
 /**
+ * Like detectCli, but also checks `<cmd> --help` against `signature`, for names other programs use too
+ * (e.g. Debian's `pi` computes digits of π). A program that doesn't match counts as not installed.
+ */
+export async function detectCliWithHelp(cmd: string, signature: RegExp, what: string): Promise<{ installed: boolean; version?: string }> {
+  const found = await detectCli(cmd);
+  if (!found.installed) return found;
+  const help = await new Promise<string>(resolve => {
+    execFile(cliPath(cmd), ['--help'], { timeout: 10000 }, (_err, stdout, stderr) => resolve(`${stdout ?? ''}\n${stderr ?? ''}`));
+  });
+  return signature.test(help) ? found : { installed: false, version: `"${cliPath(cmd)}" is not ${what}` };
+}
+
+/**
  * Spawn a CLI in the agent's cwd, call `onLine` for every stdout line, and
  * resolve when it exits. On abort: SIGINT to the process group, then SIGTERM
  * after KILL_GRACE_MS. Rejects if the process fails or exits non-zero (unless aborted).

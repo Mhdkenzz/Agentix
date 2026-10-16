@@ -5,7 +5,10 @@
 //   message_end{message:{role:'assistant',content:[{type:'text',text}],stopReason,errorMessage?}}, agent_end.
 // Pi exits 0 even when the model call fails, so an assistant message with stopReason "error" fails the turn.
 import type { AgentAdapter, AdapterContext } from './types.ts';
-import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
+import { detectCliWithHelp, runCli, parseJson, oneLine } from './proc.ts';
+
+/** What the Pi coding agent's --help mentions; Debian's unrelated `pi` (digits of π) has none of it. */
+export const PI_HELP_SIGNATURE = /--append-system-prompt|--mode\b/;
 
 export function piArgs(prompt: string, sessionId?: string, instructions?: string): string[] {
   const args = ['-p', '--mode', 'json'];
@@ -52,7 +55,7 @@ export function handlePiEvent(ctx: AdapterContext, ev: any, failures: string[]):
 export const piAdapter: AgentAdapter = {
   kind: 'pi',
 
-  detect: () => detectCli('pi'),
+  detect: () => detectCliWithHelp('pi', PI_HELP_SIGNATURE, 'the Pi coding agent'),
 
   async send(ctx, prompt) {
     const failures: string[] = [];

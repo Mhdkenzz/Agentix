@@ -5,6 +5,10 @@ import { existsSync, statSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAdapter } from './adapters/index.ts';
+import { PI_HELP_SIGNATURE } from './adapters/pi.ts';
+
+/** Same rule as HELP_SIGNATURE in scan_clis.py: names other programs use too must match their --help. */
+const HELP_SIGNATURE: Record<string, RegExp> = { pi: PI_HELP_SIGNATURE };
 
 export interface FoundCli {
   kind: string;
@@ -63,6 +67,12 @@ async function scanWithNode(): Promise<RawScan> {
     for (const d of dirs) for (const e of exts) {
       const p = join(d, kind + e);
       try { if (statSync(p).isFile() && !paths.includes(p)) paths.push(p); } catch { /* not there */ }
+    }
+    const sig = HELP_SIGNATURE[kind];
+    if (sig) {
+      const ok: string[] = [];
+      for (const p of paths) if (sig.test((await run(p, ['--help'], 8_000)) ?? '')) ok.push(p);
+      paths.splice(0, paths.length, ...ok);
     }
     if (!paths.length) continue;
     const out = await run(paths[0], ['--version'], 8_000);

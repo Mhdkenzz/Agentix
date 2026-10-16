@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,12 @@ CLIS = {
     "amp": ("Amp", ["amp"]),
     "crush": ("Crush", ["crush"]),
     "copilot": ("GitHub Copilot CLI", ["copilot"]),
+}
+
+# Names other programs use too: the CLI only counts when `--help` matches. Debian's `pi` package
+# computes digits of π; the Pi coding agent (npm @earendil-works/pi-coding-agent) has these flags.
+HELP_SIGNATURE = {
+    "pi": re.compile(r"--append-system-prompt|--mode\b"),
 }
 
 HOME = os.path.expanduser("~")
@@ -93,6 +100,18 @@ def version(path):
         return None  # timed out or could not run
 
 
+def help_matches(kind, path):
+    sig = HELP_SIGNATURE.get(kind)
+    if not sig:
+        return True
+    try:
+        r = subprocess.run([path, "--help"], capture_output=True, text=True, timeout=8,
+                           stdin=subprocess.DEVNULL, env={**os.environ, "NO_COLOR": "1", "CI": "1"})
+        return bool(sig.search((r.stdout or "") + "\n" + (r.stderr or "")))
+    except Exception:
+        return False
+
+
 def scan():
     path_dirs = [os.path.realpath(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     dirs = [d for d in extra_dirs() if d not in path_dirs]
@@ -101,6 +120,7 @@ def scan():
         paths = []
         for exe in exes:
             paths += [p for p in candidates(exe, dirs) if p not in paths]
+        paths = [p for p in paths if help_matches(kind, p)]
         if paths:
             jobs.append((kind, name, paths))
     with ThreadPoolExecutor(max_workers=8) as pool:
