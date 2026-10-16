@@ -28,6 +28,18 @@ export interface IStore {
   appendEvent(event: NewEvent, agentId: string): AgentEvent;
   /** mark agents that were mid-turn when the server died; returns how many */
   resetBusyAgents(): number;
+  /** newest first: events matching all given filters, with id < before */
+  searchEvents(f: EventSearch): AgentEvent[];
+  /** per agent: number of events and time of the latest one */
+  eventStats(): { agentId: string; count: number; lastTs: number }[];
+}
+
+export interface EventSearch {
+  q?: string;          // case-insensitive substring of the text
+  agentId?: string;
+  types?: string[];
+  before?: number;     // event id, for paging backwards
+  limit?: number;      // default 200
 }
 
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
@@ -100,6 +112,7 @@ function openSqlite(): IStore | null {
     insertEventWithId: db.prepare('INSERT INTO events (id, agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE status IN (${BUSY.map(() => '?').join(',')})`),
     countAgents: db.prepare('SELECT COUNT(*) AS n FROM agents'),
+    stats: db.prepare('SELECT agentId, COUNT(*) AS n, MAX(ts) AS lastTs FROM events GROUP BY agentId'),
   };
 
   const s: IStore = {
@@ -123,6 +136,17 @@ function openSqlite(): IStore | null {
       return { ...e, id: Number(r.lastInsertRowid), ts, agentId };
     },
     resetBusyAgents: () => Number(q.resetBusy.run(...BUSY).changes),
+    searchEvents: f => {
+      const where: string[] = [];
+      const args: any[] = [];
+      if (f.q) { where.push("text LIKE ? ESCAPE '\\'"); args.push(`%${f.q.replace(/[\\%_]/g, m => '\\' + m)}%`); }
+      if (f.agentId) { where.push('agentId = ?'); args.push(f.agentId); }
+      if (f.types?.length) { where.push(`type IN (${f.types.map(() => '?').join(',')})`); args.push(...f.types); }
+      if (f.before) { where.push('id < ?'); args.push(f.before); }
+      const sql = `SELECT * FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
+      return db.prepare(sql).all(...args, f.limit ?? 200).map(toEvent);
+    },
+    eventStats: () => q.stats.all().map((r: any) => ({ agentId: r.agentId, count: Number(r.n), lastTs: Number(r.lastTs) })),
   };
 
   // One-time import of the JSON store written by earlier versions.
@@ -189,6 +213,28 @@ function openJson(): IStore {
     },
     getEvents: (after = 0, limit = -1) => tail(events.filter(e => e.id > after), limit),
     getAgentEvents: (agentId, after = 0, limit = -1) => tail(events.filter(e => e.agentId === agentId && e.id > after), limit),
+    searchEvents: f => {
+      const q = f.q?.toLowerCase();
+      const out: AgentEvent[] = [];
+      for (let i = events.length - 1; i >= 0 && out.length < (f.limit ?? 200); i--) {
+        const e = events[i];
+        if (f.before && e.id >= f.before) continue;
+        if (f.agentId && e.agentId !== f.agentId) continue;
+        if (f.types?.length && !f.types.includes(e.type)) continue;
+        if (q && !(e.text ?? '').toLowerCase().includes(q)) continue;
+        out.push(e);
+      }
+      return out;
+    },
+    eventStats: () => {
+      const m = new Map<string, { agentId: string; count: number; lastTs: number }>();
+      for (const e of events) {
+        const s = m.get(e.agentId) ?? { agentId: e.agentId, count: 0, lastTs: 0 };
+        s.count++; s.lastTs = Math.max(s.lastTs, e.ts);
+        m.set(e.agentId, s);
+      }
+      return [...m.values()];
+    },
     appendEvent: (e, agentId) => {
       const full: AgentEvent = { ...e, id: nextEventId++, ts: Date.now(), agentId };
       events.push(full);

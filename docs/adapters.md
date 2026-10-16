@@ -45,6 +45,33 @@ The session manager owns `thinking → working → idle | stopped | error`; adap
 - Events: any line's `session_id` → session id; `assistant` content `text` → output, `tool_use` → tool;
   `result` with `is_error` → error.
 
+## pi — flags and JSON checked against @mariozechner/pi-coding-agent 0.73.1 (2026-10-16)
+- `pi -p --mode json [--session <id>] [--append-system-prompt <role instructions>] <prompt>`
+  (install: `npm i -g @mariozechner/pi-coding-agent`). A prompt starting with `-` or `@` gets a leading
+  space, since pi would read it as a flag or a file to attach.
+- Events (`docs/json.md` in the package, and a real run): first line `{type:'session',id}` → session id;
+  `tool_execution_start{toolName,args}` → tool; assistant `message_end` text → output;
+  `stopReason:'error'` + `errorMessage` → the turn fails (pi itself exits 0).
+- `--session <id>` resumed the same session id in a real run. Role instructions go through
+  `--append-system-prompt` instead of the prompt.
+- Not run against a real model here (no API key); kenz should try one turn.
+- `pi --version` prints to stderr; `detectCli` reads both.
+
+## hermes — flags checked against hermes-agent 0.19.0 (2026-10-16)
+- `hermes chat -Q --query=<prompt> --source tool --yolo [--resume <session_id>]`
+  (install: `pip install hermes-agent`). `--query=` keeps a prompt starting with `-` from parsing as a flag.
+- `-Q` prints only the final answer on stdout and `session_id: <id>` on stderr (read from the source,
+  `cli.py`). There's no streaming JSON in `chat`, so no live tool events; the answer arrives at the end.
+  `hermes-acp` (Agent Client Protocol over stdio) would give live events; a later upgrade.
+- `--yolo` because nobody can answer approval prompts; `--source tool` keeps these runs out of kenz's
+  own Hermes session list. Startup notices starting with "⚠" are dropped from the output.
+- Not run against a real model here (no API key); kenz should try one turn.
+
+## CLI paths
+
+Settings → Agent CLIs (or `PUT /api/settings {cliPaths:{pi:"/path/to/pi"}}`, or `AGENTIX_PI_BIN`) sets the
+binary for any adapter; `detect` and every turn use it.
+
 ## Adding a new adapter
 
 1. Create `packages/server/src/adapters/<name>.ts` implementing `AgentAdapter`

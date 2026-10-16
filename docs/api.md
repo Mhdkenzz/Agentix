@@ -100,6 +100,12 @@ Stop the current turn (status becomes `stopped`). No-op when idle.
 
 Get event history for an agent. `after` filters to events with id > N.
 
+### GET `/api/events`
+
+Search the whole history, newest first. Query: `q` (case-insensitive text match), `agent` (id),
+`type` (comma-separated), `before` (event id, for the next page), `limit` (default 200, max 1000).
+Response: `{ events, stats }`, where `stats` is `[{ agentId, count, lastTs }]` for every agent.
+
 ### GET / PUT `/api/settings`
 
 `{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "" }`.

@@ -130,4 +130,24 @@ mounts a throwaway one first.
    Try it in Chrome on `/ceo`. Recognition usually needs internet.
 - 39/39 `node --test` (8 new in `coordinator.test.ts`).
 
-## Next: Step 4 — more pages and adapters
+## Step 4: More pages and agents — done (2026-10-16)
+
+- **Agents** (`/agents`): table of every agent, filter by role/kind/status and search; rename inline,
+  change role (409 → "make this one the coordinator instead?") and avatar; select several to stop or
+  remove; Watch (opens the office panel) and History links.
+- **History** (`/history`): agents by latest activity with event counts, full-text search over all events
+  (`GET /api/events?q=&agent=&type=&before=&limit=`, newest first, pages backwards), type chips, and a
+  Resume box that sends a new turn on the agent's own native session.
+- **Settings** (`/settings`): who coordinates, default agent kind and folder for new agents, CLI path per
+  adapter with "Check again", voice on/off and voice choice (this browser), server URL/port notes.
+- **Adapters**: `pi` and `hermes` (see docs/adapters.md for the verified flags). Each is one file in
+  `adapters/` plus a line in `adapters/index.ts`; `AgentKind` already had both.
+- An agent's first prompt is now stored as a `message` event, so it shows in history and search.
+- 43/43 `node --test`; headless Chromium checks for all four pages pass, and the Settings page found the
+  real `pi` 0.73.1 through a CLI path override.
+
+### Not done / next ideas
+- Removing an agent still deletes its history (History only shows agents that exist).
+- Hermes has no live tool events; switching it to `hermes-acp` would add them.
+- Pi and Hermes still need one real turn each on kenz's machine (no API keys here).
+- Voice needs a real try in Chrome.

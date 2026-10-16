@@ -147,7 +147,11 @@ export class SessionManager {
     store.createAgent(agent);
     this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
 
-    if (opts.prompt) this.startTurn(id, opts.prompt);
+    if (opts.prompt) {
+      // Keep the first task in the history like any later instruction.
+      this.emit(id, { type: 'message', from: opts.from ?? 'user', text: opts.prompt });
+      this.startTurn(id, opts.prompt, opts.from ?? 'user');
+    }
     return store.getAgent(id)!;
   }
 
@@ -421,11 +425,7 @@ export class SessionManager {
         const role = (o.role as Role | undefined) ?? 'worker';
         if (role !== 'worker') throw new Error('the coordinator can only spawn workers');
         const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
-        const agent = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id });
-        if (c.text) {
-          this.emit(agent.id, { type: 'message', from: source.id, text: c.text });
-          this.startTurn(agent.id, c.text, source.id);
-        }
+        this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, prompt: c.text || undefined });
         return;
       }
       case 'steer': {

@@ -64,6 +64,34 @@ fake('claude', [
   '{"type":"result","subtype":"success","is_error":false,"result":"All done","session_id":"cl-fake-1"}',
 ]);
 
+// Trimmed from real `pi -p --mode json` output (0.73.1). FAKE_PI_ERROR=1 ends with a failed model call (exit 0, like pi).
+fake('pi', [
+  '{"type":"session","version":3,"id":"01a14434-77aa-7136-b481-570dba7b7def","timestamp":"2026-10-16T10:14:11.627Z","cwd":"/w"}',
+  '{"type":"agent_start"}',
+  '{"type":"turn_start"}',
+  '{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"say hi"}]}}',
+  '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls -la"}}',
+  '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{},"isError":false}',
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi from pi"}],"stopReason":"stop"}}',
+  '{"type":"agent_end","messages":[]}',
+]);
+{
+  const p = join(BIN, 'pi');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('if [ -n "$FAKE_FAIL" ]', `if [ -n "$FAKE_PI_ERROR" ]; then printf '%s\\n' '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"UnrecognizedClientException: bad token"}}'; fi
+if [ -n "$FAKE_FAIL" ]`));
+}
+
+// Hermes `chat -Q`: a startup notice and the final answer on stdout, "session_id: <id>" on stderr (v0.19.0).
+writeFileSync(join(BIN, 'hermes'), `#!/bin/bash
+if [ "$1" = "--version" ]; then echo "Hermes Agent v9.9.9-fake (2026.7.20)"; exit 0; fi
+{ printf '%s\\0' "$@"; printf '\\n'; } >> "${join(TMP, 'hermes.args')}"
+echo "  ⚠ tirith security scanner enabled but not available"
+echo "Hello from Hermes."
+echo "Second line."
+printf '\\nsession_id: 20261016_101543_8b1686\\n' >&2
+`);
+chmodSync(join(BIN, 'hermes'), 0o755);
+
 /** argv of each call to a fake CLI */
 export function fakeCalls(name: string): string[][] {
   const p = join(TMP, name + '.args');

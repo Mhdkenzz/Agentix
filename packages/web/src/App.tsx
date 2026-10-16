@@ -5,7 +5,9 @@ import { useStore } from './store.ts';
 import { TopBar } from './components/TopBar.tsx';
 import { NewAgentModal } from './components/NewAgentModal.tsx';
 import { Office } from './pages/Office.tsx';
-import { Placeholder } from './pages/Placeholder.tsx';
+import { Agents } from './pages/Agents.tsx';
+import { History } from './pages/History.tsx';
+import { Settings } from './pages/Settings.tsx';
 import { Ceo } from './pages/Ceo.tsx';
 
 export function App() {
@@ -42,9 +44,9 @@ export function App() {
         <Routes>
           <Route path="/" element={null} />
           <Route path="/ceo" element={<Ceo />} />
-          <Route path="/agents" element={<Placeholder title="Agents" />} />
-          <Route path="/history" element={<Placeholder title="History" />} />
-          <Route path="/settings" element={<Placeholder title="Settings" />} />
+          <Route path="/agents" element={<Agents />} />
+          <Route path="/history" element={<History />} />
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
       {showNewAgent && <NewAgentModal onClose={() => setShowNewAgent(false)} />}
