@@ -145,15 +145,44 @@ export function Ceo() {
           ? 'Hold Space (or the mic) to talk, release to send. Voice uses your browser’s speech service, which usually needs internet.'
           : 'Voice input needs Chrome or Edge. Typing works everywhere.'}</div>
       </section>
-      <TeamSidebar agents={Object.values(agents)} />
+      <aside className="ceo-side">
+        <ThinkingPanel ceo={ceo} events={events[ceo.id] ?? []} busy={busy} />
+        <TeamSidebar agents={Object.values(agents)} />
+      </aside>
     </div>
+  );
+}
+
+/** The CEO's current turn as it happens: its thinking, the tools it runs, what it says. */
+function ThinkingPanel({ ceo, events, busy }: { ceo: Agent; events: AgentEvent[]; busy: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const turn = useMemo(() => {
+    let start = -1;
+    events.forEach((e, i) => { if (e.type === 'steer' || (e.type === 'message' && e.from !== ceo.id)) start = i; });
+    return events.slice(start + 1).filter(e => ['thinking', 'tool', 'output', 'error'].includes(e.type));
+  }, [events, ceo.id]);
+  useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [turn.length]);
+
+  return (
+    <section className="mind">
+      <h3>{busy ? `${ceo.name} is thinking` : `${ceo.name}'s last turn`}</h3>
+      <div className="mind-log" ref={ref}>
+        {turn.length === 0 && <div className="muted small">{busy ? ceo.activity || 'thinking…' : 'Nothing yet. Its thoughts show up here while it works.'}</div>}
+        {turn.map(e => (
+          <div key={e.id} className={`mind-${e.type}`}>
+            {e.type === 'tool' ? <span className="mono">🛠 {e.text}</span> : e.type === 'error' ? <>⚠️ {e.text}</> : e.type === 'output' ? spoken(e.text ?? '') || e.text : e.text}
+          </div>
+        ))}
+        {busy && turn.length > 0 && <div className="muted small">{ceo.activity}</div>}
+      </div>
+    </section>
   );
 }
 
 function TeamSidebar({ agents }: { agents: Agent[] }) {
   const order = { ceo: 0, coordinator: 1, worker: 2 } as const;
   return (
-    <aside className="team">
+    <section className="team">
       <h3>What the CEO knows</h3>
       {agents.sort((a, b) => order[a.role] - order[b.role] || a.createdAt - b.createdAt).map(a => (
         <div key={a.id} className="team-row">
@@ -164,6 +193,6 @@ function TeamSidebar({ agents }: { agents: Agent[] }) {
           </div>
         </div>
       ))}
-    </aside>
+    </section>
   );
 }

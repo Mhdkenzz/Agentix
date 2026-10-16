@@ -14,12 +14,19 @@ export function claudeArgs(prompt: string, sessionId?: string): string[] {
   return args;
 }
 
-export function handleClaudeEvent(ctx: AdapterContext, ev: any): void {
+/** What Claude Code prints, as its whole reply, when it has no usable credentials. */
+const NOT_SIGNED_IN = /^(not logged in|invalid api key)\b.*\/login/i;
+export const CLAUDE_SIGN_IN_HELP =
+  "Claude Code isn't signed in on this computer. Open a terminal and run `claude auth login` (or run `claude` and type /login), then send your message again.";
+
+/** Turns one stream-json line into events. Returns true when Claude Code says it isn't signed in. */
+export function handleClaudeEvent(ctx: AdapterContext, ev: any): boolean {
   if (ev.session_id && ev.session_id !== ctx.agent.nativeSessionId) ctx.setNativeSessionId(String(ev.session_id));
 
   if (ev.type === 'assistant') {
     for (const block of ev.message?.content ?? []) {
       if (block.type === 'text' && block.text) {
+        if (NOT_SIGNED_IN.test(String(block.text).trim())) return true;
         ctx.emit({ type: 'output', text: String(block.text) });
       } else if (block.type === 'tool_use') {
         const input = block.input ?? {};
@@ -28,11 +35,14 @@ export function handleClaudeEvent(ctx: AdapterContext, ev: any): void {
         ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
       } else if (block.type === 'thinking') {
         ctx.emit({ type: 'status', text: 'thinking', data: { status: 'thinking', activity: 'thinking…' } });
+        if (block.thinking) ctx.emit({ type: 'thinking', text: String(block.thinking) });
       }
     }
   } else if (ev.type === 'result' && ev.is_error) {
+    if (NOT_SIGNED_IN.test(String(ev.result ?? '').trim())) return true;
     ctx.emit({ type: 'error', text: String(ev.result ?? 'claude error'), data: ev });
   }
+  return false;
 }
 
 export const claudeAdapter: AgentAdapter = {
@@ -41,10 +51,17 @@ export const claudeAdapter: AgentAdapter = {
   detect: () => detectCli('claude'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'claude', claudeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
-      const ev = parseJson(line);
-      if (ev) handleClaudeEvent(ctx, ev);
-      else ctx.emit({ type: 'output', text: line });
-    });
+    let notSignedIn = false;
+    try {
+      await runCli(ctx, 'claude', claudeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+        const ev = parseJson(line);
+        if (!ev) ctx.emit({ type: 'output', text: line });
+        else if (handleClaudeEvent(ctx, ev)) notSignedIn = true;
+      });
+    } catch (err) {
+      if (!notSignedIn) throw err;
+    }
+    // One clear error instead of the CLI's reply, its error result and the exit code.
+    if (notSignedIn) throw new Error(CLAUDE_SIGN_IN_HELP);
   },
 };

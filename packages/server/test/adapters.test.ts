@@ -58,9 +58,25 @@ test('claude: streams, saves session_id, steer passes --resume', async () => {
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'cl-fake-1');
   assert.deepEqual(texts(events(a.id, 'output')), ['All done']);
   assert.deepEqual(texts(events(a.id, 'tool')), ['Bash: ls']);
+  assert.deepEqual(texts(events(a.id, 'thinking')), ['Check the folder first.']);
   await sm.steerAgent(a.id, 'again');
   await settled(a.id);
   assert.ok(fakeCalls('claude')[1].join(' ').includes('--resume cl-fake-1 -- again'));
+});
+
+test('claude: not signed in gives one clear error, not the CLI reply and exit code', async () => {
+  process.env.FAKE_CLAUDE_LOGGED_OUT = '1';
+  try {
+    const a = sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
+    await settled(a.id);
+    assert.equal(sm.getAgent(a.id)!.status, 'error');
+    assert.deepEqual(events(a.id, 'output'), []);
+    const errs = texts(events(a.id, 'error'));
+    assert.equal(errs.length, 1);
+    assert.match(errs[0]!, /isn't signed in.*\/login/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_LOGGED_OUT;
+  }
 });
 
 test('pi: json events, session id, --session on steer, instructions as system prompt', async () => {

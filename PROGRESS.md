@@ -154,3 +154,11 @@ mounts a throwaway one first.
 - Hermes has no live tool events; switching it to `hermes-acp` would add them.
 - Pi and Hermes still need one real turn each on kenz's machine (no API keys here).
 - Voice needs a real try in Chrome.
+
+## Polish (2026-10-16)
+- Claude Code with no login gives one clear error ("isn't signed in… run `claude auth login`") instead of
+  its reply, an error result and the exit code.
+- New `thinking` event: Claude Code thinking blocks, Codex reasoning and OpenCode reasoning text. The CEO page's
+  right panel shows the CEO's current turn live (thinking, tools, replies).
+- Redesign: black and minimal. Violet (`--think`) is the thinking color and the main accent (New agent, nav hover,
+  focus); green working, amber waiting, red error, cyan tools and messages. The 3D office matches.

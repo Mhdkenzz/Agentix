@@ -7,7 +7,7 @@ import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { EventLine } from '../components/EventLine.tsx';
 import type { AgentEvent } from '../../../shared/src/types.ts';
 
-const TYPES = ['output', 'tool', 'steer', 'message', 'error', 'status', 'agent.created'];
+const TYPES = ['output', 'tool', 'thinking', 'steer', 'message', 'error', 'status', 'agent.created'];
 const PAGE = 150;
 
 export function History() {
@@ -16,7 +16,7 @@ export function History() {
   const [params, setParams] = useSearchParams();
   const agentId = params.get('agent') ?? '';
   const [q, setQ] = useState(params.get('q') ?? '');
-  const [types, setTypes] = useState<string[]>(['output', 'tool', 'steer', 'message', 'error']);
+  const [types, setTypes] = useState<string[]>(['output', 'tool', 'thinking', 'steer', 'message', 'error']);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [stats, setStats] = useState<Record<string, { count: number; lastTs: number }>>({});
   const [more, setMore] = useState(false);

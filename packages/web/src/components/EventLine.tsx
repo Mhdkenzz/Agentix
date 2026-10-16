@@ -3,7 +3,7 @@ import type { AgentEvent } from '../../../shared/src/types.ts';
 import { useStore } from '../store.ts';
 
 const ICON: Record<string, string> = {
-  output: '💬', tool: '🛠', status: '•', steer: '🧭', message: '✉️', error: '⚠️',
+  output: '💬', tool: '🛠', thinking: '💭', status: '•', steer: '🧭', message: '✉️', error: '⚠️',
   'agent.created': '✨', 'agent.updated': '✎', 'agent.removed': '🗑',
 };
 

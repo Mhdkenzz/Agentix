@@ -55,7 +55,7 @@ export const api = {
     call<{ events: AgentEvent[] }>(`/api/agents/${id}/events?after=${after}`).then(r => r.events),
 };
 
-const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'status', 'steer', 'message', 'error'];
+const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'thinking', 'status', 'steer', 'message', 'error'];
 
 /**
  * One EventSource for everything. The browser reconnects on its own and sends

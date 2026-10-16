@@ -60,10 +60,23 @@ fake('opencode', [
 ]);
 fake('claude', [
   '{"type":"system","subtype":"init","session_id":"cl-fake-1"}',
+  '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Check the folder first."}]},"session_id":"cl-fake-1"}',
   '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]},"session_id":"cl-fake-1"}',
   '{"type":"assistant","message":{"content":[{"type":"text","text":"All done"}]},"session_id":"cl-fake-1"}',
   '{"type":"result","subtype":"success","is_error":false,"result":"All done","session_id":"cl-fake-1"}',
 ]);
+
+// FAKE_CLAUDE_LOGGED_OUT=1: what Claude Code prints with no credentials (a synthetic reply, an error result, exit 1).
+{
+  const p = join(BIN, 'claude');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('[ -n "$FAKE_IGNORE_INT" ]', `if [ -n "$FAKE_CLAUDE_LOGGED_OUT" ]; then
+  printf '%s\\n' '{"type":"system","subtype":"init","session_id":"cl-out-1"}'
+  printf '%s\\n' '{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"session_id":"cl-out-1"}'
+  printf '%s\\n' '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","session_id":"cl-out-1"}'
+  exit 1
+fi
+[ -n "$FAKE_IGNORE_INT" ]`));
+}
 
 // Trimmed from real `pi -p --mode json` output (0.73.1). FAKE_PI_ERROR=1 ends with a failed model call (exit 0, like pi).
 fake('pi', [
