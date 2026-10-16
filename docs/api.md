@@ -153,6 +153,7 @@ it), otherwise the last `?tail=N` events (default 100).
 | `agent.removed` | Agent removed |
 | `output` | Agent produced output |
 | `tool` | Agent ran a tool/command |
+| `thinking` | The model's reasoning text (Claude Code thinking, Codex and OpenCode reasoning) |
 | `status` | Status/activity change |
 | `steer` | Human/agent sent instructions |
 | `message` | Message to an agent, e.g. `[AGENTIX UPDATE]` from `system` to the coordinator |
