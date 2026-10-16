@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Server + CLI tests
+        run: node --test packages/server/test/*.test.ts
+      - name: Dashboard typecheck
+        run: npm run typecheck -w @agentix/web
+      - name: Dashboard build
+        run: npm run build
+      - name: Committed dashboard build is up to date
+        run: git diff --exit-code --stat packages/web/dist || (echo "Run 'npm run build' and commit packages/web/dist" && exit 1)

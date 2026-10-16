@@ -1,5 +1,8 @@
 // Agentix — HTTP server with REST + SSE routes
 import { createServer } from 'node:http';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join, normalize, extname, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { AgentEvent } from '../../shared/src/types.ts';
 import { store } from './store.ts';
@@ -25,6 +28,32 @@ function sendJson(res: ServerResponse, status: number, data: unknown) {
   const body = JSON.stringify(data, null, 2);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
+}
+
+const WEB_DIST = process.env.AGENTIX_WEB_DIST || fileURLToPath(new URL('../../web/dist/', import.meta.url));
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
+  '.map': 'application/json', '.txt': 'text/plain; charset=utf-8',
+};
+
+/** The built dashboard. Unknown paths get index.html so client-side routes (/agents, ...) work on reload. */
+function serveStatic(pathname: string, res: ServerResponse) {
+  const index = join(WEB_DIST, 'index.html');
+  if (!existsSync(index)) {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Agentix server is running, but the dashboard is not built. Run: npm install && npm run build\n');
+    return;
+  }
+  let file = normalize(join(WEB_DIST, decodeURIComponent(pathname)));
+  if (!file.startsWith(WEB_DIST) || !existsSync(file) || !statSync(file).isFile()) file = index;
+  const ext = extname(file);
+  res.writeHead(200, {
+    'Content-Type': MIME[ext] ?? 'application/octet-stream',
+    // hashed assets never change; index.html must always be fresh
+    'Cache-Control': file.includes(`${sep}assets${sep}`) ? 'public, max-age=31536000, immutable' : 'no-cache',
+  });
+  res.end(readFileSync(file));
 }
 
 function writeSSE(res: ServerResponse, e: AgentEvent) {
@@ -75,12 +104,8 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
     try {
       if (parts[0] !== 'api') {
-        if (url.pathname === '/') {
-          res.writeHead(200, { 'Content-Type': 'text/plain' });
-          res.end('Agentix server is running. The web dashboard (Step 2) is not built yet; see /api/agents.\n');
-          return;
-        }
-        throw new HttpError(404, 'Not found');
+        if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
+        return serveStatic(url.pathname, res);
       }
 
       const [, resource, id, action] = parts;
@@ -93,7 +118,11 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
       if (resource === 'stream' && !id && method === 'GET') return serveSSE(req, res, url, bus);
 
       if (resource === 'agents' && !id) {
-        if (method === 'GET') return sendJson(res, 200, { agents: sm.getAgents() });
+        if (method === 'GET') {
+          // lastEventId lets a client open /api/stream?after=<it> without replaying what the snapshot already covers.
+          const lastEventId = store.getEvents(0, 1)[0]?.id ?? 0;
+          return sendJson(res, 200, { agents: sm.getAgents(), lastEventId });
+        }
         if (method === 'POST') {
           const b = await readJson(req);
           const agent = sm.createAgent(b.kind, {

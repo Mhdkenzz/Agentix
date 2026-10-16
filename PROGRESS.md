@@ -59,7 +59,46 @@ First pass by OpenCode (commit 49bb2b3); blockers fixed after review on branch `
 - Claude adapter is tested only against a fake CLI (access ends 2026-10-17).
 - Coordinator `@@spawn` / `@@steer` command parsing and the CEO are Step 3.
 
-## Next: Step 2 — live 3D office dashboard
-Install npm, scaffold `packages/web` (Vite + React + @react-three/fiber + drei + Zustand), proxy `/api`
-to 4317, and have the server serve `packages/web/dist` at `/`. The stream is ready: subscribe to
-`/api/stream` named events.
+## Step 2: Live 3D office dashboard — done (2026-10-16)
+
+`packages/web`: Vite + React 19 + @react-three/fiber + drei + Zustand + react-router. Everything in the
+scene is built from primitives (no model or font downloads), so it works offline.
+
+**The built dashboard is committed** (`packages/web/dist`), so `agentix server` serves it at
+http://127.0.0.1:4317/ on a machine without npm. After changing `packages/web/src`, run `npm run build`
+and commit `dist` too (CI fails if it's stale).
+
+```bash
+npm install                 # once, at the repo root (needs npm)
+npm run dev:web             # Vite on :5173, proxies /api to :4317 (AGENTIX_PORT/AGENTIX_URL)
+npm run build               # writes packages/web/dist, served by the server at /
+```
+
+What's there:
+- **Office** (`office/`): main room with cubicle desks in rows of 4 (more rows appear as workers are
+  added), the coordinator's glass office, the CEO's raised gold corner, windows, plants.
+- **10 avatars** (`avatars/`): Robot, Astronaut, Wizard, Ninja, Cat-person, Hacker, Scientist, Pirate,
+  Knight, Alien; 3D from primitives plus SVG thumbnails for the picker.
+- **Live status**: name tag, role badge and activity bubble above each agent; thinking = bobbing + "…",
+  working = typing + glowing laptop, waiting_input = raised hand + "?", error = red pulse + red light.
+  Agent-to-agent `message`/`steer` events fly a paper plane between desks.
+- **New agent** modal: kind (only installed CLIs enabled), role, name, folder, first prompt, avatar or
+  Random; a 409 for a second coordinator/CEO offers "Replace it".
+- **Agent panel** (click an avatar): live log, steer box (Enter sends; interrupts a busy turn),
+  Interrupt, Remove.
+- Server: serves `dist` with SPA fallback (`AGENTIX_WEB_DIST` overrides the folder);
+  `GET /api/agents` now returns `lastEventId` so the dashboard streams from there; auto names are unique.
+
+### Acceptance checks (headless Chromium, mock agents)
+1. ✅ Built app served by the server at `/`; `npm run dev` proxies `/api`.
+2. ✅ Spawned agents sit at desks, animate and show live activity.
+3. ✅ Chosen avatar is used (Pirate → 7); Random picks one.
+4. ✅ Coordinator sits in the glass office, CEO on the platform.
+5. ✅ Clicking an avatar opens its panel; a steer shows at once and the new turn's tool events start within ~1 s.
+6. ⚠️ FPS can't be measured here (software GL only). 18 agents is ~700 draw calls, fine for a laptop GPU.
+   If it's slow: lower `dpr` or turn off `shadows` in `office/OfficeScene.tsx`.
+
+Gotcha: the first drei `<Html>` in a Canvas renders empty with drei 10.7 + React 19.3, so the scene
+mounts a throwaway one first.
+
+## Next: Step 3 — coordinator and CEO
