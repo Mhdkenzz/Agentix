@@ -1,7 +1,8 @@
 // Side panel for the clicked agent: live log, steer box, interrupt/stop/remove.
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
-import { useStore } from '../store.ts';
+import { useStore, sinceClear } from '../store.ts';
+import { SessionButtons } from './SessionButtons.tsx';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { avatarFor } from '../avatars/index.ts';
 import { EventLine } from './EventLine.tsx';
@@ -32,7 +33,7 @@ export function AgentPanel() {
   }, [events?.length, id]);
 
   if (!id || !agent) return null;
-  const shown = (events ?? []).filter(e => !hideStatus || e.type !== 'status');
+  const shown = sinceClear(events).filter(e => !hideStatus || e.type !== 'status');
   const busy = ['thinking', 'working', 'starting'].includes(agent.status);
   // In "agent coordinates" mode, instructions for workers go through the coordinator.
   const viaCoordinator = mode === 'agent' && agent.role === 'worker' && !!coordinator;
@@ -65,6 +66,7 @@ export function AgentPanel() {
       <div className="row panel-tools">
         <label className="check"><input type="checkbox" checked={hideStatus} onChange={e => setHideStatus(e.target.checked)} /> hide status lines</label>
         <div className="grow" />
+        <SessionButtons agent={agent} onError={setError} />
         <button className="btn small" disabled={!busy} onClick={() => act(() => api.interrupt(agent.id))}>Interrupt</button>
         <button className="btn small danger" onClick={() => { if (confirmRemove(agent.name)) act(() => api.remove(agent.id)); }}>Remove</button>
       </div>
@@ -97,5 +99,5 @@ export function AgentPanel() {
 
 function confirmRemove(name: string): boolean {
   // A plain confirm keeps this dependency-free.
-  return window.confirm(`Stop and remove ${name}? Its history is deleted too.`);
+  return window.confirm(`Stop and remove ${name}? Its history is kept (History page and ~/.agentix/history).`);
 }

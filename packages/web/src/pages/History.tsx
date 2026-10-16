@@ -1,5 +1,6 @@
-// Searchable event history across all agents, with "resume" (a new turn on the agent's own session).
-import { useEffect, useState } from 'react';
+// Searchable event history across every agent ever created (removed ones included), with "resume"
+// (a new turn on the agent's own session) for agents that are still in the office.
+import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.ts';
 import { useStore } from '../store.ts';
@@ -7,11 +8,15 @@ import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { EventLine } from '../components/EventLine.tsx';
 import type { AgentEvent } from '../../../shared/src/types.ts';
 
-const TYPES = ['output', 'tool', 'thinking', 'steer', 'message', 'error', 'status', 'agent.created'];
+const TYPES = ['output', 'tool', 'thinking', 'steer', 'message', 'session', 'error', 'status', 'agent.created', 'agent.removed'];
 const PAGE = 150;
 
 export function History() {
-  const agents = useStore(s => s.agents);
+  const live = useStore(s => s.agents);
+  const archived = useStore(s => s.archived);
+  const setArchived = useStore(s => s.setArchived);
+  const agents = useMemo(() => ({ ...archived, ...live }), [archived, live]);
+  const [historyDir, setHistoryDir] = useState('');
   const lastEventId = useStore(s => s.lastEventId);
   const [params, setParams] = useSearchParams();
   const agentId = params.get('agent') ?? '';
@@ -43,6 +48,11 @@ export function History() {
   useEffect(() => { const t = setTimeout(() => load(), 250); return () => clearTimeout(t); }, // eslint-disable-next-line react-hooks/exhaustive-deps
     [q, agentId, types.join(','), Math.floor(lastEventId / 25)]);
 
+  // Removed agents come from the server; their history is kept.
+  const removedCount = Object.keys(archived).length;
+  useEffect(() => { api.allAgents().then(r => { setArchived(r.agents); setHistoryDir(r.historyDir); }).catch(() => {}); },
+    [setArchived, removedCount]);
+
   const agent = agentId ? agents[agentId] : undefined;
   const list = Object.values(agents).sort((a, b) => (stats[b.id]?.lastTs ?? b.createdAt) - (stats[a.id]?.lastTs ?? a.createdAt));
   const pick = (id: string) => { const n = new URLSearchParams(params); id ? n.set('agent', id) : n.delete('agent'); setParams(n); setNote(''); };
@@ -68,6 +78,7 @@ export function History() {
             <AvatarThumb id={a.avatarId} size={30} />
             <div className="grow">
               <b>{a.name}</b> <span className="muted small">{a.role !== 'worker' ? a.role : a.kind}</span>
+              {a.archivedAt && <span className="removed-tag">removed</span>}
               <div className="muted small">{stats[a.id]?.count ?? 0} events · {stats[a.id] ? new Date(stats[a.id].lastTs).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'none'}</div>
             </div>
           </button>
@@ -83,7 +94,15 @@ export function History() {
             ))}
           </div>
         </div>
-        {agent && (
+        {agent?.archivedAt && (
+          <div className="resume">
+            <div className="grow">
+              <b>{agent.name}</b> <span className="muted small">{agent.kind} · removed {new Date(agent.archivedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                {historyDir && <> · saved in <span className="mono">{historyDir}/{agent.id}.jsonl</span></>}</span>
+            </div>
+          </div>
+        )}
+        {agent && !agent.archivedAt && (
           <div className="resume">
             <div className="grow">
               <b>{agent.name}</b> <span className="muted small">{agent.kind} · {agent.status} · {agent.nativeSessionId ? `session ${agent.nativeSessionId}` : 'no saved session yet'}</span>

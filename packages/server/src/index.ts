@@ -10,6 +10,10 @@ import { EventBus } from './bus.ts';
 import { SessionManager, HttpError } from './sessions.ts';
 import { getAllAdapters } from './adapters/index.ts';
 import { getSettings, updateSettings, SettingsError } from './settings.ts';
+import { getBrief, setBrief, listNotes, addNote, deleteNote, searchContext } from './context.ts';
+import { scanClis } from './setup.ts';
+import { historyDir } from './history.ts';
+import { AGENTIX_HOME } from './store.ts';
 
 export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
 export const HOST = '127.0.0.1';
@@ -23,6 +27,22 @@ async function readJson(req: IncomingMessage): Promise<any> {
   }
   if (!body.trim()) return {};
   try { return JSON.parse(body); } catch { throw new HttpError(400, 'Invalid JSON body'); }
+}
+
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+
+/** Host header names this machine (a missing header is allowed: HTTP/1.0 clients, curl --http1.0). */
+export function isLocalHost(host: string | undefined): boolean {
+  return !host || LOCAL_HOST.test(host);
+}
+
+/** Browsers send Origin on cross-site and on most non-GET requests; it must be our own page (or the Vite dev server). */
+export function isLocalOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    const u = new URL(origin);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && LOCAL_HOST.test(u.host);
+  } catch { return false; }
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown) {
@@ -97,10 +117,10 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent); // ['api','agents',id,action]
     const method = req.method;
 
-    // CORS for the Vite dev server (Step 2)
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
+    // Only this machine may talk to the server. A Host check blocks DNS rebinding, and an Origin check stops
+    // any other website open in the browser from creating or steering agents (no CORS headers are sent).
+    if (!isLocalHost(req.headers.host)) return sendJson(res, 403, { error: 'Forbidden host' });
+    if (parts[0] === 'api' && !isLocalOrigin(req.headers.origin)) return sendJson(res, 403, { error: 'Forbidden origin' });
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     try {
@@ -139,6 +159,31 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         }
       }
 
+      if (resource === 'context') {
+        if (!id && method === 'GET') {
+          return sendJson(res, 200, {
+            brief: getBrief(), notes: listNotes(), contextPaths: getSettings().contextPaths,
+            sharedContext: getSettings().sharedContext, dir: join(AGENTIX_HOME, 'context'),
+          });
+        }
+        if (id === 'brief' && method === 'PUT') return sendJson(res, 200, { brief: setBrief((await readJson(req)).text ?? '') });
+        if (id === 'notes' && !action && method === 'POST') {
+          const b = await readJson(req);
+          if (!String(b.text ?? '').trim()) throw new HttpError(400, 'text is required');
+          return sendJson(res, 201, { note: addNote(b.text, 'user') ?? null });
+        }
+        if (id === 'notes' && action && method === 'DELETE') {
+          if (!deleteNote(action)) throw new HttpError(404, `Note ${action} not found`);
+          return sendJson(res, 200, { ok: true });
+        }
+        if (id === 'search' && method === 'GET') {
+          const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 10, 1), 50);
+          return sendJson(res, 200, { hits: searchContext(url.searchParams.get('q') ?? '', { limit }) });
+        }
+      }
+
+      if (resource === 'setup' && id === 'scan' && method === 'GET') return sendJson(res, 200, await scanClis());
+
       if (resource === 'coordinator' && id === 'ask' && method === 'POST') {
         const b = await readJson(req);
         return sendJson(res, 200, { event: sm.askCoordinator(b.text, b.about) });
@@ -148,7 +193,9 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (method === 'GET') {
           // lastEventId lets a client open /api/stream?after=<it> without replaying what the snapshot already covers.
           const lastEventId = store.getEvents(0, 1)[0]?.id ?? 0;
-          return sendJson(res, 200, { agents: sm.getAgents(), lastEventId });
+          // ?archived=1 adds removed agents (they have archivedAt), whose history is kept.
+          const agents = url.searchParams.get('archived') === '1' ? sm.getAllAgents() : sm.getAgents();
+          return sendJson(res, 200, { agents, lastEventId, historyDir: historyDir(AGENTIX_HOME) });
         }
         if (method === 'POST') {
           const b = await readJson(req);
@@ -161,7 +208,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
       if (resource === 'agents' && id && !action) {
         if (method === 'GET') {
-          const agent = sm.getAgent(id);
+          const agent = sm.getAgent(id, url.searchParams.get('archived') === '1');
           if (!agent) throw new HttpError(404, `Agent ${id} not found`);
           return sendJson(res, 200, { agent });
         }
@@ -178,8 +225,12 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           await sm.interruptAgent(id);
           return sendJson(res, 200, { ok: true });
         }
+        if (action === 'session' && method === 'POST') {
+          const b = await readJson(req);
+          return sendJson(res, 200, { event: await sm.newSession(id, Boolean(b.clear)) });
+        }
         if (action === 'events' && method === 'GET') {
-          if (!sm.getAgent(id)) throw new HttpError(404, `Agent ${id} not found`);
+          if (!sm.getAgent(id, true)) throw new HttpError(404, `Agent ${id} not found`);
           const after = Number(url.searchParams.get('after')) || 0;
           return sendJson(res, 200, { events: sm.getAgentEvents(id, after) });
         }

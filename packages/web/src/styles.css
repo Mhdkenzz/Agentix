@@ -226,3 +226,44 @@ kbd { background: var(--panel2); border: 1px solid var(--line2); border-bottom-w
 .mode-card.on { border-color: var(--think); box-shadow: 0 0 0 3px var(--accent-soft); }
 .saved { color: var(--ok); background: rgba(52,211,153,.07); border: 1px solid rgba(52,211,153,.2); padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }
 @media (max-width: 720px) { .hist-agents { display: none; } .mode-cards { grid-template-columns: 1fr; } }
+
+/* sessions, removed agents */
+.panel-tools { flex-wrap: wrap; row-gap: 6px; }
+.removed-tag { margin-left: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--err); border: 1px solid rgba(248,113,113,.4); border-radius: 99px; padding: 0 6px; }
+.hist-agent:has(.removed-tag) { opacity: .75; }
+.lead-card { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.lead-actions { display: flex; gap: 6px; flex: none; }
+.ceo-head .btn.small { align-self: center; }
+.ev-session .ev-icon { color: var(--info); }
+.ev-session .ev-text { color: var(--info); }
+.bubble-line.from-system .say { color: var(--muted); }
+
+/* shared context */
+.context, .setup { max-width: 860px; }
+.lead { margin: -6px 0 16px; max-width: 720px; }
+.context .error, .setup .error { margin: 0 0 10px; }
+.brief { font-family: inherit; resize: vertical; min-height: 110px; }
+.notes { margin-top: 10px; max-height: 340px; overflow-y: auto; }
+.note { display: flex; gap: 10px; align-items: flex-start; padding: 9px 4px; border-top: 1px solid var(--line); }
+.note-text { white-space: pre-wrap; word-break: break-word; border-left: 2px solid var(--ok); padding-left: 9px; margin-bottom: 3px; }
+.folder { padding: 6px 0; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.search { margin-bottom: 10px; }
+.hits { display: flex; flex-direction: column; gap: 8px; }
+.hit { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; }
+.hit-meta { display: flex; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 4px; }
+.hit-src { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; border-radius: 99px; padding: 0 7px; border: 1px solid currentColor; }
+.hit-note .hit-src { color: var(--ok); } .hit-output .hit-src { color: var(--info); } .hit-file .hit-src { color: var(--warn); }
+.hit-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; max-height: 9.5em; overflow: hidden; }
+
+/* setup */
+.step { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--think); color: #000; font-size: 11px; font-weight: 700; margin-right: 8px; }
+.found { display: flex; flex-direction: column; margin: 6px 0; }
+.found-row { display: flex; gap: 10px; align-items: center; padding: 8px 2px; border-top: 1px solid var(--line); }
+.found-row .ellipsis { max-width: 460px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); } .dot.warn { background: var(--warn); } .dot.off { background: var(--line2); }
+.pill { font-size: 11px; border-radius: 99px; padding: 1px 9px; border: 1px solid var(--line2); color: var(--muted); white-space: nowrap; }
+.pill-ok { color: var(--ok); border-color: rgba(52,211,153,.4); }
+.setup-pick { margin-top: 14px; }
+.span2 { grid-column: 1 / -1; margin: 4px 0 10px !important; }
+.setup textarea { resize: vertical; }

@@ -4,6 +4,7 @@
 //   @@steer <agent id or name> :: <instructions>
 //   @@stop <agent id or name>
 //   @@tell <coordinator|ceo> :: <message>
+//   @@remember :: <fact for the team's shared context>   (any agent, workers included)
 //
 // Commands must start a line (leading spaces and markdown bullets/backticks are allowed).
 
@@ -11,9 +12,10 @@ export type Command =
   | { op: 'spawn'; opts: Record<string, string>; text: string; line: string }
   | { op: 'steer'; target: string; text: string; line: string }
   | { op: 'stop'; target: string; line: string }
-  | { op: 'tell'; target: string; text: string; line: string };
+  | { op: 'tell'; target: string; text: string; line: string }
+  | { op: 'remember'; text: string; line: string };
 
-const LINE = /^\s*(?:[-*>]\s*)?`?@@(spawn|steer|stop|tell)\b(.*?)`?\s*$/i;
+const LINE = /^\s*(?:[-*>]\s*)?`?@@(spawn|steer|stop|tell|remember)\b(.*?)`?\s*$/i;
 
 export function parseCommands(text: string): { commands: Command[]; errors: string[] } {
   const commands: Command[] = [];
@@ -27,7 +29,11 @@ export function parseCommands(text: string): { commands: Command[]; errors: stri
     const head = (sep >= 0 ? rest.slice(0, sep) : rest).trim();
     const body = sep >= 0 ? rest.slice(sep + 2).trim() : '';
     const line = raw.trim();
-    if (op === 'spawn') {
+    if (op === 'remember') {
+      const fact = (sep >= 0 ? body : head).trim();
+      if (!fact) { errors.push(`${line}: remember needs ":: <fact>"`); continue; }
+      commands.push({ op: 'remember', text: fact, line });
+    } else if (op === 'spawn') {
       const opts: Record<string, string> = {};
       for (const tok of head.match(/\w+=(?:"[^"]*"|\S+)/g) ?? []) {
         const i = tok.indexOf('=');
@@ -59,10 +65,14 @@ To act on the team, write commands on their own lines in your reply (the server 
   @@steer <agent id or name> :: <instructions>
   @@stop <agent id or name>
   @@tell ceo :: <short report for the CEO>
+  @@remember :: <a fact every agent should know, e.g. a decision, a path, a gotcha>
+Workers see the team brief, shared notes and related findings of other agents under [SHARED CONTEXT].
 Keep commands to what the work needs. Anything else you write is shown to kenz.`;
 
 export const CEO_INSTRUCTIONS = `[AGENTIX] You are the CEO of a team of AI coding agents run by Agentix. kenz talks to you, often by voice,
 so answer in short, plain spoken sentences (no markdown, no code blocks).
 You never direct workers yourself. To get something done, tell the coordinator with a line:
   @@tell coordinator :: <what you want done>
+To save something every agent should know (a decision kenz made, a preference), add a line:
+  @@remember :: <the fact>
 Each message from kenz comes with a [TEAM STATUS] digest of every agent, so you always know what the team is doing.`;

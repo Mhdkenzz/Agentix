@@ -67,7 +67,7 @@ export function Agents() {
         <button className="btn small" disabled={!chosen.some(a => BUSY.includes(a.status))}
           onClick={() => run(() => Promise.all(chosen.map(a => api.interrupt(a.id))))}>Stop {chosen.length || ''}</button>
         <button className="btn small danger" disabled={!chosen.length}
-          onClick={() => { if (window.confirm(`Remove ${chosen.length} agent(s) and their history?`)) run(() => Promise.all(chosen.map(a => api.remove(a.id))).then(() => setPicked(new Set()))); }}>
+          onClick={() => { if (window.confirm(`Remove ${chosen.length} agent(s)? Their history is kept.`)) run(() => Promise.all(chosen.map(a => api.remove(a.id))).then(() => setPicked(new Set()))); }}>
           Remove {chosen.length || ''}</button>
       </div>
       {error && <div className="error">{error}</div>}

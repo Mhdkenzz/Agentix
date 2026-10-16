@@ -1,6 +1,6 @@
 // Agentix — server settings, kept in $AGENTIX_HOME/settings.json.
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 import { AGENTIX_HOME } from './store.ts';
 
 export type CoordinatorMode = 'human' | 'agent' | 'both';
@@ -16,17 +16,26 @@ export interface Settings {
   cliPaths: Record<string, string>;
   defaultKind: string;
   defaultCwd: string;
+  /** give workers and the coordinator the [SHARED CONTEXT] block (brief, notes, related findings) */
+  sharedContext: boolean;
+  /** folders whose text files are searched for the shared context (docs, notes, a repo) */
+  contextPaths: string[];
+  /** the first-run setup has been finished (or skipped) */
+  setupDone: boolean;
 }
 
 const MODES: CoordinatorMode[] = ['human', 'agent', 'both'];
-const DEFAULTS: Settings = { coordinatorMode: 'both', cliPaths: {}, defaultKind: 'codex', defaultCwd: '' };
+const DEFAULTS: Settings = {
+  coordinatorMode: 'both', cliPaths: {}, defaultKind: 'codex', defaultCwd: '',
+  sharedContext: true, contextPaths: [], setupDone: false,
+};
 const file = () => join(AGENTIX_HOME, 'settings.json');
 
 let cache: Settings | undefined;
 
 export function getSettings(): Settings {
   if (cache) return cache;
-  try { cache = { ...DEFAULTS, ...JSON.parse(readFileSync(file(), 'utf8')) }; } catch { cache = { ...DEFAULTS, cliPaths: {} }; }
+  try { cache = { ...DEFAULTS, ...JSON.parse(readFileSync(file(), 'utf8')) }; } catch { cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [] }; }
   return cache!;
 }
 
@@ -44,6 +53,15 @@ export function updateSettings(patch: Partial<Settings>): Settings {
   }
   if (typeof patch.defaultKind === 'string') next.defaultKind = patch.defaultKind;
   if (typeof patch.defaultCwd === 'string') next.defaultCwd = patch.defaultCwd.trim();
+  if (patch.sharedContext !== undefined) next.sharedContext = Boolean(patch.sharedContext);
+  if (patch.setupDone !== undefined) next.setupDone = Boolean(patch.setupDone);
+  if (patch.contextPaths !== undefined) {
+    if (!Array.isArray(patch.contextPaths)) throw new SettingsError('contextPaths must be a list of folders');
+    const paths = patch.contextPaths.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim());
+    const bad = paths.find(p => !isAbsolute(p));
+    if (bad) throw new SettingsError(`contextPaths must be absolute paths: ${bad}`);
+    next.contextPaths = [...new Set(paths)];
+  }
   mkdirSync(join(file(), '..'), { recursive: true });
   writeFileSync(file() + '.tmp', JSON.stringify(next, null, 2));
   renameSync(file() + '.tmp', file());
