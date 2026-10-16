@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake Claude Code CLI for the browser tests: canned stream-json, no network, no model.
+if [ "$1" = "--version" ]; then
+  echo "2.1.301 (Claude Code)"
+  exit 0
+fi
+
+sid="s-$RANDOM$RANDOM"
+echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+echo "{\"type\":\"assistant\",\"session_id\":\"$sid\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Thinking about what kenz asked.\"}]}}"
+
+case "$*" in
+  *"first task"*)
+    text='Plan: Rook builds, Juno tests.\n@@spawn kind=codex name=Rook avatar=random :: Build the todo app\n@@spawn kind=codex name=Juno avatar=random :: Write tests\n@@remember :: The todo app uses plain HTML + JS'
+    ;;
+  *)
+    text='Hi kenz. The team is set up and working.'
+    ;;
+esac
+echo "{\"type\":\"assistant\",\"session_id\":\"$sid\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"$text\"}]}}"
+echo '{"type":"result","is_error":false,"result":"ok"}'

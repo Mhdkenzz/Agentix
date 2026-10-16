@@ -2,3 +2,9 @@ node_modules/
 *.log
 .DS_Store
 packages/web/node_modules/
+
+# Browser tests (npm run e2e)
+test-results/
+playwright-report/
+# Default test AGENTIX_HOME is $TMPDIR/agentix-e2e; this covers E2E_AGENTIX_HOME pointed inside the repo
+.agentix-e2e/
