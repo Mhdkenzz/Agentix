@@ -35,6 +35,7 @@ function fake(name: string, lines: string[]) {
   const body = lines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
   writeFileSync(join(BIN, name), `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "${name} 9.9.9-fake"; exit 0; fi
+if [ "$1" = "--help" ]; then echo "usage: ${name} [options] -p --mode json --append-system-prompt <text>"; exit 0; fi
 [ -n "$FAKE_IGNORE_INT" ] && trap '' INT
 { printf '%s\\0' "$@"; printf '\\n'; } >> "${join(TMP, name + '.args')}"
 echo "$(pwd -P) $PWD" >> "${join(TMP, name + '.cwd')}"

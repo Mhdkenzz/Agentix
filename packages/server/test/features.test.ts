@@ -3,13 +3,19 @@ import { TMP, WORK, fakeCalls, waitFor } from './helpers.ts';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { startServer } from '../src/index.ts';
 import { AGENTIX_HOME } from '../src/store.ts';
 import { updateSettings } from '../src/settings.ts';
 import { addNote, listNotes, searchContext, sharedContextBlock, chunk } from '../src/context.ts';
 import { parseCommands } from '../src/commands.ts';
+import { piAdapter } from '../src/adapters/pi.ts';
+
+const SCAN_SCRIPT = fileURLToPath(new URL('../scripts/scan_clis.py', import.meta.url));
 
 const { server, sessionManager: sm, port } = await startServer(0);
 const base = `http://127.0.0.1:${port}`;
@@ -154,4 +160,23 @@ test('setup scan finds the agent CLIs on this machine', async () => {
   assert.equal(codex.path, join(TMP, 'bin', 'codex'));
   assert.match(codex.version, /9\.9\.9-fake/);
   assert.ok(['python', 'node'].includes(r.body.scanner));
+});
+
+test('a different program called "pi" (Debian\'s digits-of-π tool) is not taken for the Pi coding agent', async () => {
+  const other = join(TMP, 'other-pi');
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, 'pi'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pi 1.3.6"; exit 0; fi\necho "Usage: pi [number of digits]"\n');
+  chmodSync(join(other, 'pi'), 0o755);
+
+  // the scan script, with only the impostor on PATH
+  const out = await promisify(execFile)('python3', [SCAN_SCRIPT], { env: { ...process.env, PATH: `${other}:/usr/bin:/bin`, HOME: other } });
+  assert.ok(!JSON.parse(out.stdout).found.some((f: any) => f.kind === 'pi'), 'impostor pi not offered');
+  // with the real fake on PATH it is found
+  assert.ok((await json('/api/setup/scan')).body.found.some((f: any) => f.kind === 'pi' && f.supported));
+
+  // the adapter check behind Settings and New agent
+  updateSettings({ cliPaths: { pi: join(other, 'pi') } });
+  assert.equal((await piAdapter.detect()).installed, false);
+  updateSettings({ cliPaths: {} });
+  assert.equal((await piAdapter.detect()).installed, true);
 });
