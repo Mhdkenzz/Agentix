@@ -1,15 +1,17 @@
 import { useEffect } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { api, connectStream } from './api.ts';
 import { useStore } from './store.ts';
 import { TopBar } from './components/TopBar.tsx';
 import { NewAgentModal } from './components/NewAgentModal.tsx';
 import { Office } from './pages/Office.tsx';
 import { Placeholder } from './pages/Placeholder.tsx';
+import { Ceo } from './pages/Ceo.tsx';
 
 export function App() {
   const showNewAgent = useStore(s => s.showNewAgent);
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
+  const onOffice = useLocation().pathname === '/';
 
   useEffect(() => {
     const { setAgents, applyEvent, setConnected } = useStore.getState();
@@ -26,6 +28,7 @@ export function App() {
       });
     }).catch(() => { setConnected(false); retry = setTimeout(start, 2000); });
     start();
+    api.settings().then(useStore.getState().setServerSettings).catch(() => {});
     return () => { cancelled = true; clearTimeout(retry); stop(); };
   }, []);
 
@@ -33,8 +36,12 @@ export function App() {
     <div className="app">
       <TopBar />
       <main>
+        {/* The office stays mounted (paused while hidden): remounting the WebGL canvas is slow,
+            and unmounting drei <Html> labels throws a removeChild error. */}
+        <div className="route-office" hidden={!onOffice}><Office active={onOffice} /></div>
         <Routes>
-          <Route path="/" element={<Office />} />
+          <Route path="/" element={null} />
+          <Route path="/ceo" element={<Ceo />} />
           <Route path="/agents" element={<Placeholder title="Agents" />} />
           <Route path="/history" element={<Placeholder title="History" />} />
           <Route path="/settings" element={<Placeholder title="Settings" />} />

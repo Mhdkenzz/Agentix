@@ -6,7 +6,7 @@
 // --auto approves permissions that aren't explicitly denied (no one is there to answer prompts).
 // JSON lines carry sessionID and a `part`: step_start, text{part.text}, tool_use{part.tool, part.state},
 //   step_finish{part.reason}, error{error}
-import type { AgentAdapter, AdapterContext } from './types.ts';
+import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
 
 export function opencodeArgs(prompt: string, sessionId?: string): string[] {
@@ -52,7 +52,7 @@ export const opencodeAdapter: AgentAdapter = {
   detect: () => detectCli('opencode'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'opencode', opencodeArgs(prompt, ctx.agent.nativeSessionId), line => {
+    await runCli(ctx, 'opencode', opencodeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
       const ev = parseJson(line);
       if (ev) handleOpencodeEvent(ctx, ev);
       else ctx.emit({ type: 'output', text: line });

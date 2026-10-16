@@ -1,6 +1,7 @@
 // App state: agents, recent events per agent, selection and in-flight message arcs.
 import { create } from 'zustand';
 import type { Agent, AgentEvent } from '../../shared/src/types.ts';
+import type { ServerSettings } from './api.ts';
 
 const MAX_EVENTS_PER_AGENT = 400;
 const ARC_MS = 2500;
@@ -15,6 +16,8 @@ interface State {
   selectedId?: string;
   arcs: Arc[];
   showNewAgent: boolean;
+  server?: ServerSettings;
+  setServerSettings(s: ServerSettings): void;
   setAgents(list: Agent[]): void;
   applyEvent(e: AgentEvent): void;
   setHistory(agentId: string, list: AgentEvent[]): void;
@@ -31,6 +34,7 @@ export const useStore = create<State>((set, get) => ({
   connected: false,
   arcs: [],
   showNewAgent: false,
+  setServerSettings(server) { set({ server }); },
 
   setAgents(list) {
     set({ agents: Object.fromEntries(list.map(a => [a.id, a])) });

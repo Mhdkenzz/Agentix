@@ -8,6 +8,8 @@ import { getAdapter } from './adapters/index.ts';
 import { KILL_GRACE_MS, oneLine } from './adapters/proc.ts';
 import { store, AGENTIX_HOME } from './store.ts';
 import { EventBus } from './bus.ts';
+import { getSettings } from './settings.ts';
+import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command } from './commands.ts';
 
 const ROLES: Role[] = ['ceo', 'coordinator', 'worker'];
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
@@ -40,6 +42,8 @@ export interface CreateOptions {
   prompt?: string;
   /** demote an existing coordinator/CEO instead of failing with 409 */
   replace?: boolean;
+  /** who asked: 'user' or the id of the agent (coordinator) that spawned it */
+  from?: string;
 }
 
 /** A random name nobody in the office has yet (falls back to Name-2, Name-3, ... when all are taken). */
@@ -58,6 +62,10 @@ export class SessionManager {
   private running = new Map<string, RunningTurn>();
   private pendingUpdates: string[] = [];
   private updateTimer: NodeJS.Timeout | undefined;
+  /** messages waiting for an agent to finish its current turn (CEO <- coordinator) */
+  private inbox = new Map<string, string[]>();
+  /** role whose instructions each agent has already been given in its current session */
+  private briefed = new Map<string, Role>();
 
   constructor(bus: EventBus) {
     this.bus = bus;
@@ -137,7 +145,7 @@ export class SessionManager {
       createdAt: Date.now(),
     };
     store.createAgent(agent);
-    this.emit(id, { type: 'agent.created', from: 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
+    this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
 
     if (opts.prompt) this.startTurn(id, opts.prompt);
     return store.getAgent(id)!;
@@ -169,12 +177,14 @@ export class SessionManager {
     const agent = this.requireAgent(id);
     await this.interruptAgent(id);
     store.removeAgent(id);
+    this.inbox.delete(id);
+    this.briefed.delete(id);
     this.emit(id, { type: 'agent.removed', text: `Agent ${agent.name} removed` });
   }
 
   // ---------- turns ----------
 
-  private startTurn(agentId: string, prompt: string): void {
+  private startTurn(agentId: string, prompt: string, from = 'user'): void {
     const agent = this.requireAgent(agentId);
     const adapter = getAdapter(agent.kind);
     if (!adapter) {
@@ -190,9 +200,22 @@ export class SessionManager {
     const { signal } = controller;
     this.setStatus(agentId, 'thinking', 'thinking…');
 
+    // Coordinator and CEO get their role instructions once per session (again after a role change).
+    let instructions: string | undefined;
+    if (agent.role !== 'worker' && (!agent.nativeSessionId || this.briefed.get(agentId) !== agent.role)) {
+      instructions = agent.role === 'coordinator' ? COORDINATOR_INSTRUCTIONS : CEO_INSTRUCTIONS;
+    }
+    if (agent.role !== 'worker') this.briefed.set(agentId, agent.role);
+    // The CEO always sees what the whole team is doing.
+    if (agent.role === 'ceo') {
+      const label = from === 'user' ? '[FROM KENZ]' : '';
+      prompt = `[TEAM STATUS]\n${this.teamDigest(agentId)}\n\n${label ? label + '\n' : ''}${prompt}`;
+    }
+
     const ctx = {
       agent,
       signal,
+      instructions,
       emit: (e: NewEvent) => {
         if (signal.aborted) return; // late output from a turn that was replaced
         if (e.type === 'status') {
@@ -201,6 +224,7 @@ export class SessionManager {
           this.setStatus(agentId, status, d.activity ?? e.text ?? status);
         } else {
           this.emit(agentId, e);
+          if (e.type === 'output' && e.text && agent.role !== 'worker') this.runCommands(agentId, e.text);
         }
       },
       setNativeSessionId: (sid: string) => {
@@ -270,7 +294,7 @@ export class SessionManager {
     }
 
     if (this.running.has(agentId)) await this.interruptAgent(agentId);
-    this.startTurn(agentId, text);
+    this.startTurn(agentId, text, from);
     return event;
   }
 
@@ -289,6 +313,11 @@ export class SessionManager {
   private onTurnEnd(agentId: string, aborted: boolean, failure?: string): void {
     const agent = store.getAgent(agentId);
     if (!agent) return;
+    const waiting = this.inbox.get(agentId);
+    if (waiting?.length && !aborted) {
+      this.inbox.delete(agentId);
+      this.startTurn(agentId, waiting.join('\n\n'), 'system');
+    }
     if (agent.role === 'coordinator') {
       // Updates that arrived while the coordinator was busy go out now.
       if (this.pendingUpdates.length) this.scheduleFlush();
@@ -303,7 +332,7 @@ export class SessionManager {
   }
 
   private queueUpdate(line: string): void {
-    if (!this.findRole('coordinator')) return; // human-coordinator mode
+    if (!this.findRole('coordinator') || getSettings().coordinatorMode === 'human') return; // kenz coordinates
     this.pendingUpdates.push(line);
     this.scheduleFlush();
   }
@@ -317,14 +346,118 @@ export class SessionManager {
   private flushUpdates(): void {
     this.updateTimer = undefined;
     const coordinator = this.findRole('coordinator');
-    if (!coordinator) { this.pendingUpdates = []; return; }
+    if (!coordinator || getSettings().coordinatorMode === 'human') { this.pendingUpdates = []; return; }
     if (this.running.has(coordinator.id)) return; // retried when its turn ends
 
     const lines = this.pendingUpdates.splice(0);
     if (!lines.length) return;
     const text = `[AGENTIX UPDATE]\n${lines.map(l => `- ${l}`).join('\n')}\n\nTeam:\n${this.teamDigest(coordinator.id)}`;
     this.emit(coordinator.id, { type: 'message', from: 'system', text });
-    this.startTurn(coordinator.id, text);
+    this.startTurn(coordinator.id, text, 'system');
+  }
+
+  // ---------- messages and @@ commands ----------
+
+  /** kenz writes to the coordinator (e.g. about a worker, in "agent" coordinator mode). */
+  askCoordinator(text: string, about?: string): AgentEvent {
+    if (!text) throw new HttpError(400, 'text is required');
+    const coordinator = this.findRole('coordinator');
+    if (!coordinator) throw new HttpError(409, 'There is no coordinator agent');
+    const target = about ? store.getAgent(about) : undefined;
+    const line = target ? `kenz about ${target.name} (${target.id}): "${text}"` : `kenz: "${text}"`;
+    const event = this.emit(coordinator.id, { type: 'message', from: 'user', text: target ? `About ${target.name}: ${text}` : text });
+    if (getSettings().coordinatorMode === 'human') return event;
+    this.pendingUpdates.push(line);
+    this.scheduleFlush();
+    return event;
+  }
+
+  /** Find an agent by id, or by name (case-insensitive). */
+  private resolve(target: string): Agent | undefined {
+    const t = target.trim().replace(/^["']|["']$/g, '');
+    const agents = store.getAgents();
+    return agents.find(a => a.id === t) ?? agents.find(a => a.name.toLowerCase() === t.toLowerCase())
+      ?? (['coordinator', 'ceo'].includes(t.toLowerCase()) ? agents.find(a => a.role === t.toLowerCase()) : undefined);
+  }
+
+  /** Run the @@ commands in a coordinator's or CEO's output. */
+  private runCommands(sourceId: string, text: string): void {
+    const source = store.getAgent(sourceId);
+    if (!source || source.role === 'worker') return;
+    const { commands, errors } = parseCommands(text);
+    const fail = (msg: string) => this.emit(sourceId, { type: 'error', from: 'system', text: msg });
+    for (const e of errors) fail(e);
+    if (!commands.length) return;
+    if (source.role === 'coordinator' && getSettings().coordinatorMode === 'human') {
+      fail(`Coordinator mode is "human", so ${commands.length} command(s) were not run`);
+      return;
+    }
+    for (const c of commands) {
+      // Run each command on its own tick so a spawn/steer never re-enters the turn that produced it.
+      queueMicrotask(() => this.runCommand(source, c).catch(err => fail(`${c.line}: ${err?.message ?? err}`)));
+    }
+  }
+
+  private async runCommand(source: Agent, c: Command): Promise<void> {
+    if (source.role === 'ceo') {
+      // The CEO talks to the coordinator and nobody else.
+      if (c.op !== 'tell' || !['coordinator', this.findRole('coordinator')?.id, this.findRole('coordinator')?.name.toLowerCase()].includes(c.target.toLowerCase())) {
+        throw new Error('the CEO can only "@@tell coordinator :: <message>"');
+      }
+      const coordinator = this.findRole('coordinator');
+      if (!coordinator || getSettings().coordinatorMode === 'human') {
+        this.emit(source.id, { type: 'message', from: 'system', text: `No coordinator agent is running; kenz is coordinating. Message kept here: ${c.text}` });
+        return;
+      }
+      this.emit(coordinator.id, { type: 'message', from: source.id, text: c.text });
+      this.pendingUpdates.push(`CEO ${source.name} says: "${c.text}"`);
+      this.scheduleFlush();
+      return;
+    }
+
+    switch (c.op) {
+      case 'spawn': {
+        const o = c.opts;
+        const role = (o.role as Role | undefined) ?? 'worker';
+        if (role !== 'worker') throw new Error('the coordinator can only spawn workers');
+        const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
+        const agent = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id });
+        if (c.text) {
+          this.emit(agent.id, { type: 'message', from: source.id, text: c.text });
+          this.startTurn(agent.id, c.text, source.id);
+        }
+        return;
+      }
+      case 'steer': {
+        const target = this.resolve(c.target);
+        if (!target) throw new Error(`no agent called "${c.target}"`);
+        if (target.id === source.id) throw new Error('an agent cannot steer itself');
+        if (target.role === 'ceo') throw new Error('use "@@tell ceo :: ..." to report to the CEO');
+        await this.steerAgent(target.id, c.text, source.id);
+        return;
+      }
+      case 'stop': {
+        const target = this.resolve(c.target);
+        if (!target) throw new Error(`no agent called "${c.target}"`);
+        if (target.role !== 'worker') throw new Error('the coordinator can only stop workers');
+        this.emit(target.id, { type: 'message', from: source.id, text: 'stop' });
+        await this.interruptAgent(target.id);
+        return;
+      }
+      case 'tell': {
+        const target = this.resolve(c.target);
+        if (!target) throw new Error(`no agent called "${c.target}"`);
+        if (target.role !== 'ceo') throw new Error('use "@@steer <worker> :: ..." to direct workers');
+        this.emit(target.id, { type: 'message', from: source.id, text: c.text });
+        const msg = `[FROM COORDINATOR ${source.name}]\n${c.text}`;
+        if (this.running.has(target.id)) {
+          this.inbox.set(target.id, [...(this.inbox.get(target.id) ?? []), msg]);
+        } else {
+          this.startTurn(target.id, msg, source.id);
+        }
+        return;
+      }
+    }
   }
 
   /** One line per agent plus the start of its latest output. */

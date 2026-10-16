@@ -1,5 +1,6 @@
 // Agentix — mock adapter (no external dependencies)
 import type { AgentAdapter } from './types.ts';
+import { oneLine } from './proc.ts';
 
 const TOOL_NAMES = [
   'reading README.md', 'editing src/app.ts', 'running npm test',
@@ -43,7 +44,10 @@ export const mockAdapter: AgentAdapter = {
         ctx.emit({ type: 'tool', text: tool, data: { tool, progress: `${i + 1}/${totalSteps}` } });
         ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
       } else {
-        ctx.emit({ type: 'output', text: `Done: ${prompt}\n\nStep ${i + 1}/${totalSteps} completed. Mock agent finished successfully.` });
+        // Lines of the prompt that start with "say: " are repeated verbatim, so tests and demos can make a
+        // mock coordinator or CEO issue @@ commands. Everything else is echoed on one line.
+        const said = prompt.split('\n').filter(l => l.startsWith('say: ')).map(l => l.slice(5));
+        ctx.emit({ type: 'output', text: [`Done: ${oneLine(prompt, 4000)}`, ...said, '', `Step ${i + 1}/${totalSteps} completed. Mock agent finished successfully.`].join('\n') });
       }
     }
   },

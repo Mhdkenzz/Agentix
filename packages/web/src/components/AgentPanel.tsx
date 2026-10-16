@@ -12,6 +12,8 @@ export function AgentPanel() {
   const events = useStore(s => (id ? s.events[id] : undefined));
   const select = useStore(s => s.select);
   const setHistory = useStore(s => s.setHistory);
+  const mode = useStore(s => s.server?.coordinatorMode);
+  const coordinator = useStore(s => Object.values(s.agents).find(a => a.role === 'coordinator'));
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const [hideStatus, setHideStatus] = useState(true);
@@ -32,6 +34,8 @@ export function AgentPanel() {
   if (!id || !agent) return null;
   const shown = (events ?? []).filter(e => !hideStatus || e.type !== 'status');
   const busy = ['thinking', 'working', 'starting'].includes(agent.status);
+  // In "agent coordinates" mode, instructions for workers go through the coordinator.
+  const viaCoordinator = mode === 'agent' && agent.role === 'worker' && !!coordinator;
 
   async function act(fn: () => Promise<unknown>) {
     setError('');
@@ -43,7 +47,7 @@ export function AgentPanel() {
     if (!t) return;
     setText('');
     stick.current = true;
-    await act(() => api.steer(agent!.id, t));
+    await act(() => viaCoordinator ? api.askCoordinator(t, agent!.id) : api.steer(agent!.id, t));
   }
 
   return (
@@ -76,12 +80,17 @@ export function AgentPanel() {
           value={text}
           onChange={e => setText(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); steer(); } }}
-          placeholder={busy ? `Steer ${agent.name} (interrupts the current turn)…` : `Tell ${agent.name} what to do…`}
+          placeholder={viaCoordinator ? `Ask ${coordinator!.name} (coordinator) about ${agent.name}…`
+            : busy ? `Steer ${agent.name} (interrupts the current turn)…` : `Tell ${agent.name} what to do…`}
           rows={2}
         />
         <button className="btn primary" disabled={!text.trim()}>Send</button>
       </form>
-      {agent.role === 'worker' && <div className="muted small hint">The coordinator is told about every steer.</div>}
+      {agent.role === 'worker' && coordinator && mode !== 'human' && (
+        <div className="muted small hint">{viaCoordinator
+          ? `Agent-coordinates mode: your note goes to ${coordinator.name}, who directs ${agent.name}.`
+          : `${coordinator.name} (coordinator) is told about every steer.`}</div>
+      )}
     </aside>
   );
 }

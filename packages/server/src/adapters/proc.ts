@@ -2,14 +2,15 @@
 import { spawn, execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { AdapterContext } from './types.ts';
+import { cliPath } from '../settings.ts';
 
 /** Grace period between SIGINT and SIGTERM when a turn is interrupted. */
 export const KILL_GRACE_MS = Number(process.env.AGENTIX_KILL_GRACE_MS) || 3000;
 
-/** `<cmd> --version`, or not installed if it can't be run. */
+/** `<cmd> --version`, or not installed if it can't be run. `cmd` is the adapter kind; Settings can override its path. */
 export function detectCli(cmd: string): Promise<{ installed: boolean; version?: string }> {
   return new Promise(resolve => {
-    execFile(cmd, ['--version'], { timeout: 10000 }, (err, stdout) => {
+    execFile(cliPath(cmd), ['--version'], { timeout: 10000 }, (err, stdout) => {
       if (err && (err as any).code === 'ENOENT') return resolve({ installed: false });
       const version = String(stdout || '').trim().split('\n')[0];
       resolve(err && !version ? { installed: false } : { installed: true, version: version || 'unknown' });
@@ -31,7 +32,7 @@ export function runCli(
   return new Promise((resolve, reject) => {
     if (ctx.signal.aborted) return resolve();
 
-    const child = spawn(cmd, args, {
+    const child = spawn(cliPath(cmd), args, {
       cwd: ctx.agent.cwd,
       // PWD too: some CLIs (opencode) trust $PWD over the real cwd, and ours is the server's
       env: { ...process.env, PWD: ctx.agent.cwd },

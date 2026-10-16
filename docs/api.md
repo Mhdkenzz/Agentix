@@ -100,6 +100,31 @@ Stop the current turn (status becomes `stopped`). No-op when idle.
 
 Get event history for an agent. `after` filters to events with id > N.
 
+### GET / PUT `/api/settings`
+
+`{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "" }`.
+PUT takes any subset. `coordinatorMode`: `human` (no coordinator updates, its @@ commands are ignored),
+`agent` (the dashboard routes kenz's worker instructions through the coordinator), `both` (default).
+Stored in `$AGENTIX_HOME/settings.json`.
+
+### POST `/api/coordinator/ask`
+
+`{ "text": "...", "about": "<agent id>?" }`: a note from kenz to the coordinator. Shown as a `message`
+on the coordinator and delivered in its next `[AGENTIX UPDATE]`. `409` if there is no coordinator.
+
+## Coordinator and CEO commands
+
+Lines in a coordinator's output (the server runs them; see `server/src/commands.ts`):
+
+```
+@@spawn kind=codex name=Rook avatar=random cwd=/abs/path :: <task>
+@@steer <agent id or name> :: <instructions>
+@@stop <agent id or name>
+@@tell ceo :: <report>
+```
+
+The CEO may only write `@@tell coordinator :: <message>`. Every CEO turn starts with a `[TEAM STATUS]` digest.
+
 ### GET `/api/stream`
 
 **SSE** endpoint. Streams all events for all agents. Each message is
