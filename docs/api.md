@@ -12,8 +12,8 @@ Returns which agent CLIs are installed and their versions.
 ```json
 {
   "adapters": [
-    { "kind": "mock", "installed": true, "version": "mock" },
-    { "kind": "codex", "installed": false },
+    { "kind": "codex", "installed": true, "version": "codex-cli 0.162.1" },
+    { "kind": "pi", "installed": false },
     { "kind": "opencode", "installed": true, "version": "1.0.0" }
   ]
 }
@@ -30,7 +30,7 @@ List all agents.
     {
       "id": "a_7k2x",
       "name": "Nova",
-      "kind": "mock",
+      "kind": "codex",
       "role": "worker",
       "avatarId": 0,
       "cwd": "/home/user/.agentix/workspace",
@@ -54,7 +54,7 @@ Create a new agent.
 **Body:**
 ```json
 {
-  "kind": "mock",
+  "kind": "codex",
   "role": "worker",
   "name": "Nova",
   "avatarId": "random",

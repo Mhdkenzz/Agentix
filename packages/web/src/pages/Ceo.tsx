@@ -9,7 +9,7 @@ import { loadSettings, saveSettings } from '../settings.ts';
 import { NewAgentModal } from '../components/NewAgentModal.tsx';
 import type { Agent, AgentEvent } from '../../../shared/src/types.ts';
 
-/** What the CEO "said": its output without @@ lines and the mock adapter's boilerplate. */
+/** What the CEO "said": its output without the @@ command lines. */
 function spoken(text: string): string {
   return text.split('\n').filter(l => !/^\s*(?:[-*>]\s*)?`?@@/.test(l)).join('\n').trim();
 }

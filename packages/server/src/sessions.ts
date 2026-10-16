@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import type { Agent, AgentEvent, Role, Status } from '../../shared/src/types.ts';
 import { NAMES } from '../../shared/src/types.ts';
-import { getAdapter } from './adapters/index.ts';
+import { getAdapter, mockEnabled } from './adapters/index.ts';
 import { KILL_GRACE_MS, oneLine } from './adapters/proc.ts';
 import { store, AGENTIX_HOME } from './store.ts';
 import { EventBus } from './bus.ts';
@@ -69,6 +69,8 @@ export class SessionManager {
 
   constructor(bus: EventBus) {
     this.bus = bus;
+    // Mock agents left over from before the mock adapter was hidden: drop them and their history.
+    if (!mockEnabled()) for (const a of store.getAgents()) if (a.kind === 'mock') store.removeAgent(a.id);
   }
 
   // ---------- events ----------

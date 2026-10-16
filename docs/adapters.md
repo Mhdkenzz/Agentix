@@ -12,7 +12,9 @@ Shared process handling is in `packages/server/src/adapters/proc.ts`:
 
 The session manager owns `thinking → working → idle | stopped | error`; adapters only report activity.
 
-## mock
+## mock (tests only)
+- Hidden unless `AGENTIX_MOCK=1`; the test helpers set it. With it off, the server drops any leftover
+  mock agents and their events at startup.
 - No external dependencies. 8 steps over ~5 s (`AGENTIX_MOCK_STEP_MS` = base ms per step).
 - Stops immediately when its turn is aborted.
 

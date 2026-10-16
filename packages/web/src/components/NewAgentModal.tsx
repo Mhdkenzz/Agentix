@@ -23,7 +23,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   useEffect(() => {
     api.adapters().then(list => {
       setAdapters(list);
-      if (!list.find(a => a.kind === kind && a.installed)) setKind(list.find(a => a.installed)?.kind ?? 'mock');
+      if (!list.find(a => a.kind === kind && a.installed)) setKind(list.find(a => a.installed)?.kind ?? kind);
     }).catch(e => setError(String(e.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -12,6 +12,7 @@ mkdirSync(BIN);
 mkdirSync(WORK);
 
 process.env.AGENTIX_HOME = join(TMP, 'home');
+process.env.AGENTIX_MOCK = '1';
 process.env.AGENTIX_MOCK_STEP_MS = '20';
 process.env.AGENTIX_UPDATE_DELAY_MS = '100';
 process.env.AGENTIX_KILL_GRACE_MS = '300';

@@ -16,14 +16,20 @@ const adapters: Record<string, AgentAdapter> = {
   hermes: hermesAdapter,
 };
 
+/** The mock adapter is for tests only and stays hidden unless AGENTIX_MOCK=1. */
+export function mockEnabled(): boolean {
+  return process.env.AGENTIX_MOCK === '1';
+}
+
 export function getAdapter(kind: string): AgentAdapter | undefined {
+  if (kind === 'mock' && !mockEnabled()) return undefined;
   return adapters[kind];
 }
 
 export function getAllAdapters(): AgentAdapter[] {
-  return Object.values(adapters);
+  return getAdapterNames().map(k => adapters[k]);
 }
 
 export function getAdapterNames(): string[] {
-  return Object.keys(adapters);
+  return Object.keys(adapters).filter(k => k !== 'mock' || mockEnabled());
 }

@@ -229,7 +229,7 @@ const HELP = `\x1b[1mAgentix\x1b[0m — AI agent orchestration
   Usage:
     agentix server                          Start the server (AGENTIX_PORT, default 4317)
     agentix doctor                          Check node, store and installed agent CLIs
-    agentix spawn <kind> [opts] "<prompt>"  Spawn an agent (kinds: mock, codex, opencode, claude)
+    agentix spawn <kind> [opts] "<prompt>"  Spawn an agent (kinds: codex, opencode, claude, pi, hermes)
         --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --replace
     agentix ls                              List agents
     agentix logs <id> [-f]                  Show (or follow) an agent's events
