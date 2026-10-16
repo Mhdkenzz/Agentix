@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fake Codex CLI for the browser tests: canned JSONL, no network, no model.
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.162.1"
+  exit 0
+fi
+
+echo "{\"type\":\"thread.started\",\"thread_id\":\"th-$RANDOM$RANDOM\"}"
+echo '{"type":"turn.started"}'
+echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Scaffolded index.html and app.js."}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1200,"output_tokens":300}}'
