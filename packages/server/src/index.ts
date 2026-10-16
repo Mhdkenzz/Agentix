@@ -118,6 +118,19 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
       if (resource === 'stream' && !id && method === 'GET') return serveSSE(req, res, url, bus);
 
+      if (resource === 'events' && !id && method === 'GET') {
+        const p = url.searchParams;
+        const limit = Math.min(Math.max(Number(p.get('limit')) || 200, 1), 1000);
+        const events = store.searchEvents({
+          q: p.get('q') || undefined,
+          agentId: p.get('agent') || undefined,
+          types: p.get('type')?.split(',').filter(Boolean),
+          before: Number(p.get('before')) || undefined,
+          limit,
+        });
+        return sendJson(res, 200, { events, stats: store.eventStats() });
+      }
+
       if (resource === 'settings' && !id) {
         if (method === 'GET') return sendJson(res, 200, { settings: getSettings() });
         if (method === 'PUT' || method === 'PATCH') {

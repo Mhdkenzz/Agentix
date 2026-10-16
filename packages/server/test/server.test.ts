@@ -97,6 +97,21 @@ test('GET /api/agents has lastEventId for stream?after=', async () => {
   assert.ok(latest && body.lastEventId >= latest.id);
 });
 
+test('GET /api/events searches text, filters by agent and type, pages with before', async () => {
+  const a = (await json('/api/agents', 'POST', { kind: 'mock', name: 'Searchy' })).body.agent;
+  await json(`/api/agents/${a.id}/steer`, 'POST', { text: 'find the 100%_Needle here' });
+  await json(`/api/agents/${a.id}/interrupt`, 'POST');
+  const hit = (await json('/api/events?q=100%25_needle')).body;
+  assert.equal(hit.events.length, 1, 'case-insensitive, % and _ are literal');
+  assert.equal(hit.events[0].agentId, a.id);
+  assert.equal((await json('/api/events?q=100%25x')).body.events.length, 0);
+  const mine = (await json(`/api/events?agent=${a.id}&type=steer,agent.created`)).body.events;
+  assert.deepEqual(mine.map((e: any) => e.type), ['steer', 'agent.created'], 'newest first');
+  const older = (await json(`/api/events?agent=${a.id}&before=${mine[0].id}`)).body.events;
+  assert.ok(older.every((e: any) => e.id < mine[0].id));
+  assert.ok(hit.stats.some((s: any) => s.agentId === a.id && s.count >= 2));
+});
+
 test('auto names are unique while names are free', async () => {
   const names: string[] = [];
   for (let i = 0; i < 5; i++) names.push((await json('/api/agents', 'POST', { kind: 'mock' })).body.agent.name);

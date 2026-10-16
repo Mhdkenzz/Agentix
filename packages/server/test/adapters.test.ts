@@ -1,7 +1,8 @@
 // Real adapters driven through the session manager, against fake CLIs on PATH.
-import { WORK, fakeCalls, fakeCwds, waitFor } from './helpers.ts';
+import { WORK, TMP, fakeCalls, fakeCwds, waitFor } from './helpers.ts';
 import test from 'node:test';
-import { realpathSync } from 'node:fs';
+import { realpathSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { EventBus } from '../src/bus.ts';
 import { SessionManager } from '../src/sessions.ts';
@@ -60,6 +61,51 @@ test('claude: streams, saves session_id, steer passes --resume', async () => {
   await sm.steerAgent(a.id, 'again');
   await settled(a.id);
   assert.ok(fakeCalls('claude')[1].join(' ').includes('--resume cl-fake-1 -- again'));
+});
+
+test('pi: json events, session id, --session on steer, instructions as system prompt', async () => {
+  const a = sm.createAgent('pi', { cwd: WORK, prompt: 'say hi' });
+  await settled(a.id);
+  assert.equal(sm.getAgent(a.id)!.status, 'idle');
+  assert.equal(sm.getAgent(a.id)!.nativeSessionId, '01a14434-77aa-7136-b481-570dba7b7def');
+  assert.deepEqual(texts(events(a.id, 'output')), ['hi from pi']);
+  assert.deepEqual(texts(events(a.id, 'tool')), ['bash: ls -la']);
+  assert.deepEqual(fakeCalls('pi')[0], ['-p', '--mode', 'json', 'say hi']);
+  await sm.steerAgent(a.id, '@file looks like an attachment');
+  await settled(a.id);
+  assert.deepEqual(fakeCalls('pi')[1], ['-p', '--mode', 'json', '--session', '01a14434-77aa-7136-b481-570dba7b7def', ' @file looks like an attachment']);
+
+  const c = sm.createAgent('pi', { cwd: WORK, role: 'coordinator', prompt: 'lead', replace: true });
+  try {
+    await settled(c.id);
+    // (fakeCalls splits on newlines, which the instructions contain, so read the raw log)
+    const raw = readFileSync(join(TMP, 'pi.args'), 'utf8');
+    assert.match(raw, /--append-system-prompt\0\[AGENTIX\] You are the COORDINATOR[^\0]*\0lead\0\n$/, 'instructions go in the system prompt, the prompt stays as is');
+  } finally {
+    sm.updateAgent(c.id, { role: 'worker' }); // a leftover coordinator would get update turns in later tests
+  }
+});
+
+test('pi: a failed model call (exit 0) ends the turn in error', async () => {
+  process.env.FAKE_PI_ERROR = '1';
+  try {
+    const a = sm.createAgent('pi', { cwd: WORK, prompt: 'x' });
+    await settled(a.id);
+    assert.equal(sm.getAgent(a.id)!.status, 'error');
+    assert.match(texts(events(a.id, 'error')).join(), /bad token/);
+  } finally { delete process.env.FAKE_PI_ERROR; }
+});
+
+test('hermes: final answer as output, session id from stderr, --resume on steer', async () => {
+  const a = sm.createAgent('hermes', { cwd: WORK, prompt: '-starts with a dash' });
+  await settled(a.id);
+  assert.equal(sm.getAgent(a.id)!.status, 'idle');
+  assert.equal(sm.getAgent(a.id)!.nativeSessionId, '20261016_101543_8b1686');
+  assert.deepEqual(texts(events(a.id, 'output')), ['Hello from Hermes.\nSecond line.']);
+  assert.deepEqual(fakeCalls('hermes')[0], ['chat', '-Q', '--query=-starts with a dash', '--source', 'tool', '--yolo']);
+  await sm.steerAgent(a.id, 'more');
+  await settled(a.id);
+  assert.deepEqual(fakeCalls('hermes')[1], ['chat', '-Q', '--query=more', '--source', 'tool', '--yolo', '--resume', '20261016_101543_8b1686']);
 });
 
 test('status goes thinking -> working -> idle with no duplicate status events', async () => {

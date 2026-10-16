@@ -10,9 +10,10 @@ export const KILL_GRACE_MS = Number(process.env.AGENTIX_KILL_GRACE_MS) || 3000;
 /** `<cmd> --version`, or not installed if it can't be run. `cmd` is the adapter kind; Settings can override its path. */
 export function detectCli(cmd: string): Promise<{ installed: boolean; version?: string }> {
   return new Promise(resolve => {
-    execFile(cliPath(cmd), ['--version'], { timeout: 10000 }, (err, stdout) => {
+    execFile(cliPath(cmd), ['--version'], { timeout: 10000 }, (err, stdout, stderr) => {
       if (err && (err as any).code === 'ENOENT') return resolve({ installed: false });
-      const version = String(stdout || '').trim().split('\n')[0];
+      // Some CLIs (pi) print their version on stderr.
+      const version = (String(stdout || '').trim() || String(stderr || '').trim()).split('\n')[0];
       resolve(err && !version ? { installed: false } : { installed: true, version: version || 'unknown' });
     });
   });
@@ -28,6 +29,7 @@ export function runCli(
   cmd: string,
   args: string[],
   onLine: (line: string) => void,
+  onStderrLine?: (line: string) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (ctx.signal.aborted) return resolve();
@@ -63,6 +65,7 @@ export function runCli(
     });
 
     let stderr = '';
+    if (onStderrLine) createInterface({ input: child.stderr! }).on('line', line => { try { onStderrLine(line); } catch { /* ignore */ } });
     child.stderr!.on('data', (d: Buffer) => {
       stderr += d.toString();
       if (stderr.length > 20000) stderr = stderr.slice(-20000);

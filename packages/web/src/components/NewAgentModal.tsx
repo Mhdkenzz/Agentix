@@ -5,15 +5,14 @@ import { AVATARS } from '../avatars/index.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { useStore } from '../store.ts';
 import type { Role } from '../../../shared/src/types.ts';
-import { loadSettings } from '../settings.ts';
 
 export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): void; initialRole?: Role }) {
-  const settings = loadSettings();
+  const server = useStore(s => s.server);
   const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
-  const [kind, setKind] = useState(settings.defaultKind);
+  const [kind, setKind] = useState(server?.defaultKind || 'codex');
   const [role, setRole] = useState<Role>(initialRole);
   const [name, setName] = useState('');
-  const [cwd, setCwd] = useState(settings.defaultCwd);
+  const [cwd, setCwd] = useState(server?.defaultCwd ?? '');
   const [prompt, setPrompt] = useState('');
   const [avatar, setAvatar] = useState<number | 'random'>('random');
   const [error, setError] = useState('');
