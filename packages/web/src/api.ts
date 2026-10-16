@@ -1,5 +1,8 @@
 // REST + SSE client for the Agentix server. In dev, Vite proxies /api to the server.
-import type { Agent, AgentEvent, Role, Task, TaskStatus, Usage } from '../../shared/src/types.ts';
+import type { Agent, AgentEvent, ModelOption, Role, Task, TaskStatus, Usage } from '../../shared/src/types.ts';
+
+export type { ModelOption };
+export interface ModelList { models: ModelOption[]; current?: string; error?: string }
 
 export interface AdapterInfo { kind: string; installed: boolean; version?: string }
 
@@ -29,6 +32,7 @@ export interface NewAgent {
   prompt?: string;
   replace?: boolean;
   worktree?: boolean;
+  model?: string;
 }
 
 export type CoordinatorMode = 'human' | 'agent' | 'both';
@@ -61,12 +65,14 @@ export interface ScanResult { scanner: 'python' | 'node'; platform: string; foun
 export const api = {
   settings: () => call<{ settings: ServerSettings }>('/api/settings').then(r => r.settings),
   saveSettings: (patch: Partial<ServerSettings>) => call<{ settings: ServerSettings }>('/api/settings', 'PUT', patch).then(r => r.settings),
+  resetWorkspace: () => call<{ ok: boolean; settings: ServerSettings }>('/api/reset', 'POST'),
   askCoordinator: (text: string, about?: string) => call('/api/coordinator/ask', 'POST', { text, about }),
   adapters: () => call<{ adapters: AdapterInfo[] }>('/api/adapters').then(r => r.adapters),
+  models: (kind: string, refresh = false) => call<ModelList>(`/api/adapters/${encodeURIComponent(kind)}/models${refresh ? '?refresh=1' : ''}`),
   agents: () => call<{ agents: Agent[] }>('/api/agents').then(r => r.agents),
   snapshot: () => call<{ agents: Agent[]; lastEventId: number }>('/api/agents'),
   create: (a: NewAgent) => call<{ agent: Agent }>('/api/agents', 'POST', a).then(r => r.agent),
-  update: (id: string, patch: Partial<Agent> & { replace?: boolean }) =>
+  update: (id: string, patch: Omit<Partial<Agent>, 'model'> & { replace?: boolean; model?: string | null }) =>
     call<{ agent: Agent }>(`/api/agents/${id}`, 'PATCH', patch).then(r => r.agent),
   remove: (id: string) => call(`/api/agents/${id}`, 'DELETE'),
   /** live and removed agents (removed ones have archivedAt) */

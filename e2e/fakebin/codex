@@ -5,6 +5,11 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 
+if [ "$1 $2" = "debug models" ]; then
+  echo '{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","description":"Latest workhorse model for coding and everyday work.","visibility":"list","priority":1,"default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]},{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","description":"Frontier intelligence.","visibility":"list","priority":2},{"slug":"gpt-reserve","visibility":"hide","priority":9}]}'
+  exit 0
+fi
+
 echo "{\"type\":\"thread.started\",\"thread_id\":\"th-$RANDOM$RANDOM\"}"
 echo '{"type":"turn.started"}'
 # Leave a change in the working folder, so a worker's git worktree has something to diff and merge.

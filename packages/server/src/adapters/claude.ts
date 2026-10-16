@@ -8,8 +8,9 @@
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, parseJson, oneLine, emitUsage } from './proc.ts';
 
-export function claudeArgs(prompt: string, sessionId?: string): string[] {
+export function claudeArgs(prompt: string, sessionId?: string, model?: string): string[] {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits'];
+  if (model) args.push('--model', model);
   if (sessionId) args.push('--resume', sessionId);
   args.push('--', prompt);
   return args;
@@ -61,7 +62,7 @@ export const claudeAdapter: AgentAdapter = {
   async send(ctx, prompt) {
     let notSignedIn = false;
     try {
-      await runCli(ctx, 'claude', claudeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+      await runCli(ctx, 'claude', claudeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId, ctx.agent.model), line => {
         const ev = parseJson(line);
         if (!ev) ctx.emit({ type: 'output', text: line });
         else if (handleClaudeEvent(ctx, ev)) notSignedIn = true;

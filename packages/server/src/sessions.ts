@@ -5,6 +5,7 @@ import { join, isAbsolute } from 'node:path';
 import type { Agent, AgentEvent, Role, Status } from '../../shared/src/types.ts';
 import { NAMES } from '../../shared/src/types.ts';
 import { getAdapter, mockEnabled } from './adapters/index.ts';
+import { unavailableModelError } from './adapters/models.ts';
 import { KILL_GRACE_MS, oneLine } from './adapters/proc.ts';
 import { store, AGENTIX_HOME } from './store.ts';
 import { EventBus } from './bus.ts';
@@ -20,6 +21,8 @@ const BUSY: Status[] = ['starting', 'thinking', 'working'];
 
 /** How long to batch coordinator updates before sending them as one turn. */
 const UPDATE_DELAY_MS = Number(process.env.AGENTIX_UPDATE_DELAY_MS) || 5000;
+const CEO_REPLY_TIMEOUT_MS = Math.max(1000, Number(process.env.AGENTIX_CEO_REPLY_TIMEOUT_MS) || 30_000);
+const CEO_REPLY_ATTEMPTS = 3;
 
 export class HttpError extends Error {
   status: number;
@@ -38,6 +41,14 @@ interface RunningTurn {
   done: Promise<void>;
 }
 
+interface PendingCeoRequest {
+  ceoId: string;
+  coordinatorId: string;
+  text: string;
+  attempts: number;
+  timer?: NodeJS.Timeout;
+}
+
 export interface CreateOptions {
   name?: string;
   role?: Role;
@@ -50,6 +61,17 @@ export interface CreateOptions {
   from?: string;
   /** false: work directly in cwd even when it is a git repo (workers only; default from settings) */
   worktree?: boolean;
+  /** the model for the CLI's model flag; empty = the CLI's default */
+  model?: string;
+}
+
+/** A model name as the CLI's flag takes it: trimmed, no spaces or quotes, empty = default. */
+export function cleanModel(model: unknown): string | undefined {
+  if (model == null) return undefined;
+  const m = String(model).trim();
+  if (!m) return undefined;
+  if (m.length > 200 || /[\s"'`\\]/.test(m) || m.startsWith('-')) throw new HttpError(400, `Not a model name: ${m.slice(0, 60)}`);
+  return m;
 }
 
 /** A random name nobody in the office has yet (falls back to Name-2, Name-3, ... when all are taken). */
@@ -68,6 +90,10 @@ export class SessionManager {
   private running = new Map<string, RunningTurn>();
   private pendingUpdates: string[] = [];
   private updateTimer: NodeJS.Timeout | undefined;
+  /** One outstanding CEO request per CEO; follow-ups never interrupt a coordinator turn. */
+  private pendingCeoRequests = new Map<string, PendingCeoRequest>();
+  /** when each agent's last turn ended, so the CEO watchdog only counts time the coordinator was idle */
+  private lastTurnEnd = new Map<string, number>();
   /** messages waiting for an agent to finish its current turn (CEO <- coordinator) */
   private inbox = new Map<string, string[]>();
   /** role whose instructions each agent has already been given in its current session */
@@ -142,6 +168,7 @@ export class SessionManager {
 
     let id = 'a_' + randomUUID().slice(0, 6);
     while (store.getAgent(id, true)) id = 'a_' + randomUUID().slice(0, 6); // removed agents keep their ids
+    const model = cleanModel(opts.model);
     this.claimRole(role, id, opts.replace);
     const name = opts.name || pickName();
 
@@ -166,9 +193,10 @@ export class SessionManager {
       activity: 'idle',
       createdAt: Date.now(),
       ...(worktree ? { worktree } : {}),
+      ...(model ? { model } : {}),
     };
     store.createAgent(agent);
-    this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
+    this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}${model ? ` ${model}` : ''}, ${role})`, data: agent });
     if (worktree) this.emit(id, { type: 'message', from: 'system', text: `Working on branch ${worktree.branch} in its own worktree (${worktree.path}), from ${worktree.repo}` });
     if (worktreeError) this.emit(id, { type: 'error', from: 'system', text: `No worktree (${oneLine(worktreeError, 200)}); working directly in ${cwd}` });
 
@@ -180,7 +208,7 @@ export class SessionManager {
     return store.getAgent(id)!;
   }
 
-  updateAgent(id: string, patch: { name?: string; avatarId?: number; role?: Role; cwd?: string; replace?: boolean }): Agent {
+  updateAgent(id: string, patch: { name?: string; avatarId?: number; role?: Role; cwd?: string; replace?: boolean; model?: string | null }): Agent {
     const agent = this.requireAgent(id);
     if (patch.role && patch.role !== agent.role) {
       if (!ROLES.includes(patch.role)) throw new HttpError(400, `Unknown role: ${patch.role}`);
@@ -196,6 +224,11 @@ export class SessionManager {
     if (patch.cwd) {
       if (!isAbsolute(patch.cwd)) throw new HttpError(400, 'cwd must be an absolute path');
       agent.cwd = patch.cwd;
+    }
+    if (patch.model !== undefined) {
+      // takes effect from the agent's next turn
+      const model = cleanModel(patch.model);
+      if (model) agent.model = model; else delete agent.model;
     }
     store.updateAgent(agent);
     this.emit(id, { type: 'agent.updated', text: `Agent ${agent.name} updated`, data: agent });
@@ -215,6 +248,7 @@ export class SessionManager {
     store.archiveAgent(id);
     this.inbox.delete(id);
     this.briefed.delete(id);
+    this.clearCeoRequestsForAgent(id);
     this.emit(id, { type: 'agent.removed', text: `Agent ${agent.name} removed (history kept)` });
   }
 
@@ -231,6 +265,7 @@ export class SessionManager {
     store.updateAgent(agent);
     this.inbox.delete(id);
     this.briefed.delete(id);
+    this.clearCeoRequestsForAgent(id);
     this.setStatus(id, 'idle', clear ? 'idle (cleared)' : 'idle (new session)');
     return this.emit(id, { type: 'session', from: 'user', text: clear ? 'Session cleared' : 'New session started', data: { clear } });
   }
@@ -290,12 +325,16 @@ export class SessionManager {
     if (fields.owner && !owner) throw new HttpError(400, `no agent called "${fields.owner}"`);
     const task = this.taskCall(() => createTask({ ...fields, owner, by: from }));
     this.emitTask(task, from, 'New task');
-    if (from === 'user') this.queueUpdate(`kenz added task ${task.id}: ${task.title}`);
+    if (from === 'user') {
+      this.queueUpdate(`kenz added task ${task.id}: ${task.title}`);
+      this.startAssignedTask(task, from);
+    }
     return task;
   }
 
   editTask(id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }, from = 'user'): Task {
-    if (!getTask(id)) throw new HttpError(404, `no task ${id}`);
+    const before = getTask(id);
+    if (!before) throw new HttpError(404, `no task ${id}`);
     let owner = patch.owner;
     if (owner) {
       const a = this.resolve(owner);
@@ -305,6 +344,8 @@ export class SessionManager {
     const task = this.taskCall(() => updateTask(id, { ...patch, owner }));
     this.emitTask(task, from, 'Task');
     if (from === 'user') this.queueUpdate(`kenz changed task ${task.id} to ${task.status}: ${task.title}`);
+    // A to-do task handed to a (different) worker starts it, from the board or from the coordinator.
+    if (task.owner && task.owner !== before.owner) this.startAssignedTask(task, from);
     return task;
   }
 
@@ -318,6 +359,19 @@ export class SessionManager {
   private advanceTasks(agentId: string, from: TaskStatus[], to: TaskStatus): void {
     for (const t of listTasks()) {
       if (t.owner === agentId && from.includes(t.status)) this.emitTask(updateTask(t.id, { status: to }), 'system', 'Task');
+    }
+  }
+
+  /** Start a newly assigned worker task, or queue it behind the worker's current turn. */
+  private startAssignedTask(task: Task, from: string): void {
+    if (task.status !== 'todo' || !task.owner) return;
+    const worker = store.getAgent(task.owner);
+    if (!worker || worker.role !== 'worker') return;
+    const prompt = `[TASK ${task.id}] ${task.title}`;
+    if (this.running.has(worker.id)) {
+      this.inbox.set(worker.id, [...(this.inbox.get(worker.id) ?? []), prompt]);
+    } else {
+      this.startTurn(worker.id, prompt, from);
     }
   }
 
@@ -449,6 +503,23 @@ export class SessionManager {
   async shutdown(): Promise<void> {
     await Promise.all([...this.running.keys()].map(id => this.interruptAgent(id).catch(() => {})));
     if (this.updateTimer) clearTimeout(this.updateTimer);
+    for (const pending of this.pendingCeoRequests.values()) if (pending.timer) clearTimeout(pending.timer);
+    this.pendingCeoRequests.clear();
+  }
+
+  /** Stop every turn and remove the live workspace state for a clean first launch. */
+  async resetWorkspace(): Promise<void> {
+    await this.shutdown();
+    this.pendingUpdates = [];
+    this.inbox.clear();
+    this.briefed.clear();
+    for (const agent of store.getAgents()) {
+      if (agent.worktree) {
+        try { removeWorktree(agent.worktree, agent.name); } catch { /* keep the user's repository safe */ }
+      }
+      store.removeAgent(agent.id);
+    }
+    store.reset();
   }
 
   // ---------- coordinator updates ----------
@@ -458,6 +529,7 @@ export class SessionManager {
   }
 
   private onTurnEnd(agentId: string, aborted: boolean, failure?: string): void {
+    this.lastTurnEnd.set(agentId, Date.now());
     const agent = store.getAgent(agentId);
     if (!agent) return;
     const waiting = this.inbox.get(agentId);
@@ -577,6 +649,7 @@ export class SessionManager {
       }
       this.emit(coordinator.id, { type: 'message', from: source.id, text: c.text });
       this.pendingUpdates.push(`CEO ${source.name} says: "${c.text}"`);
+      this.trackCeoRequest(source, coordinator, c.text);
       this.scheduleFlush();
       return;
     }
@@ -587,7 +660,10 @@ export class SessionManager {
         const status = c.opts.status as TaskStatus | undefined;
         if (status && !TASK_STATUSES.includes(status)) throw new Error(`status must be one of ${TASK_STATUSES.join(', ')}`);
         if (c.id) this.editTask(c.id, { status, ...(c.opts.owner ? { owner: c.opts.owner } : {}), ...(c.text ? { note: c.text } : {}) }, source.id);
-        else this.addTask({ title: c.text, owner: c.opts.owner, status }, source.id);
+        else {
+          const task = this.addTask({ title: c.text, owner: c.opts.owner, status }, source.id);
+          this.startAssignedTask(task, source.id);
+        }
         return;
       }
       case 'spawn': {
@@ -596,8 +672,13 @@ export class SessionManager {
         if (role !== 'worker') throw new Error('the coordinator can only spawn workers');
         const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
         const worktree = o.worktree === undefined ? undefined : !/^(no|false|off|0)$/i.test(o.worktree);
+        const model = cleanModel(o.model);
+        if (model) {
+          const modelError = await unavailableModelError(o.kind, model);
+          if (modelError) throw new Error(modelError);
+        }
         // The task goes on the board before the worker starts, so its first turn moves it to doing.
-        const created = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree });
+        const created = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree, model });
         if (c.text) {
           this.addTask({ title: oneLine(c.text, 140), owner: created.id, status: 'todo' }, source.id);
           this.emit(created.id, { type: 'message', from: source.id, text: c.text });
@@ -609,7 +690,13 @@ export class SessionManager {
         const target = this.resolve(c.target);
         if (!target) throw new Error(`no agent called "${c.target}"`);
         if (target.id === source.id) throw new Error('an agent cannot steer itself');
-        if (target.role === 'ceo') throw new Error('use "@@tell ceo :: ..." to report to the CEO');
+        // Older coordinator turns sometimes used @@steer for a CEO report. Treat it as
+        // @@tell so that a harmless wording mismatch does not lose the delegation update
+        // or interrupt the CEO's current turn.
+        if (target.role === 'ceo') {
+          this.tellCeo(source, target, c.text);
+          return;
+        }
         await this.steerAgent(target.id, c.text, source.id);
         return;
       }
@@ -625,15 +712,85 @@ export class SessionManager {
         const target = this.resolve(c.target);
         if (!target) throw new Error(`no agent called "${c.target}"`);
         if (target.role !== 'ceo') throw new Error('use "@@steer <worker> :: ..." to direct workers');
-        this.emit(target.id, { type: 'message', from: source.id, text: c.text });
-        const msg = `[FROM COORDINATOR ${source.name}]\n${c.text}`;
-        if (this.running.has(target.id)) {
-          this.inbox.set(target.id, [...(this.inbox.get(target.id) ?? []), msg]);
-        } else {
-          this.startTurn(target.id, msg, source.id);
-        }
+        this.tellCeo(source, target, c.text);
         return;
       }
+    }
+  }
+
+  /** Deliver a coordinator report to the CEO without interrupting an active CEO turn. */
+  private tellCeo(source: Agent, target: Agent, text: string): void {
+    this.clearCeoRequest(target.id, source.id);
+    this.emit(target.id, { type: 'message', from: source.id, text });
+    const msg = `[FROM COORDINATOR ${source.name}]\n${text}`;
+    if (this.running.has(target.id)) {
+      this.inbox.set(target.id, [...(this.inbox.get(target.id) ?? []), msg]);
+    } else {
+      this.startTurn(target.id, msg, source.id);
+    }
+  }
+
+  private trackCeoRequest(ceo: Agent, coordinator: Agent, text: string): void {
+    this.clearCeoRequest(ceo.id);
+    const pending: PendingCeoRequest = { ceoId: ceo.id, coordinatorId: coordinator.id, text, attempts: 1 };
+    this.pendingCeoRequests.set(ceo.id, pending);
+    this.armCeoRequestTimer(pending);
+  }
+
+  private armCeoRequestTimer(pending: PendingCeoRequest, ms = CEO_REPLY_TIMEOUT_MS): void {
+    pending.timer = setTimeout(() => this.onCeoRequestTimeout(pending), ms);
+    pending.timer.unref();
+  }
+
+  private onCeoRequestTimeout(pending: PendingCeoRequest): void {
+    if (this.pendingCeoRequests.get(pending.ceoId) !== pending) return;
+    const ceo = store.getAgent(pending.ceoId);
+    const coordinator = store.getAgent(pending.coordinatorId);
+    if (!ceo || !coordinator || this.findRole('coordinator')?.id !== pending.coordinatorId || getSettings().coordinatorMode === 'human') {
+      this.reportCeoIssue(pending, 'the coordinator is unavailable or coordinator mode is set to human');
+      return;
+    }
+    // Only idle time counts: a coordinator that is working (or just finished) hasn't ignored the request.
+    const quiet = Date.now() - (this.lastTurnEnd.get(coordinator.id) ?? 0);
+    if (this.running.has(coordinator.id) || quiet < CEO_REPLY_TIMEOUT_MS) {
+      this.armCeoRequestTimer(pending, this.running.has(coordinator.id) ? CEO_REPLY_TIMEOUT_MS : CEO_REPLY_TIMEOUT_MS - quiet);
+      return;
+    }
+    if (pending.attempts >= CEO_REPLY_ATTEMPTS) {
+      this.reportCeoIssue(pending, `no reply after ${CEO_REPLY_ATTEMPTS} requests`);
+      return;
+    }
+
+    pending.attempts++;
+    const followUp = `[Agentix follow-up ${pending.attempts}/${CEO_REPLY_ATTEMPTS}] ${ceo.name} has not received a reply. Please acknowledge the request or report any blocker. Original request: ${pending.text}`;
+    this.emit(coordinator.id, { type: 'message', from: ceo.id, text: followUp });
+    this.pendingUpdates.push(`CEO ${ceo.name} is still waiting for a coordinator reply (${pending.attempts}/${CEO_REPLY_ATTEMPTS}): "${pending.text}"`);
+    this.scheduleFlush();
+    this.armCeoRequestTimer(pending);
+  }
+
+  private reportCeoIssue(pending: PendingCeoRequest, reason: string): void {
+    const ceo = store.getAgent(pending.ceoId);
+    if (pending.timer) clearTimeout(pending.timer);
+    this.pendingCeoRequests.delete(pending.ceoId);
+    if (!ceo) return;
+    this.emit(ceo.id, {
+      type: 'error', from: 'system',
+      text: `Agentix could not get a response to your coordinator request: ${reason}. The active run was not interrupted.`,
+      data: { coordinatorId: pending.coordinatorId, attempts: pending.attempts },
+    });
+  }
+
+  private clearCeoRequest(ceoId: string, coordinatorId?: string): void {
+    const pending = this.pendingCeoRequests.get(ceoId);
+    if (!pending || (coordinatorId && pending.coordinatorId !== coordinatorId)) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.pendingCeoRequests.delete(ceoId);
+  }
+
+  private clearCeoRequestsForAgent(agentId: string): void {
+    for (const pending of this.pendingCeoRequests.values()) {
+      if (pending.ceoId === agentId || pending.coordinatorId === agentId) this.clearCeoRequest(pending.ceoId);
     }
   }
 

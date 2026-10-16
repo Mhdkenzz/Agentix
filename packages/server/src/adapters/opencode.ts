@@ -10,8 +10,9 @@
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, parseJson, oneLine, count, UsageTally } from './proc.ts';
 
-export function opencodeArgs(prompt: string, sessionId?: string): string[] {
+export function opencodeArgs(prompt: string, sessionId?: string, model?: string): string[] {
   const args = ['run', '--standalone', '--format', 'json', '--auto'];
+  if (model) args.push('-m', model); // provider/model, e.g. opencode/big-pickle
   if (sessionId) args.push('-s', sessionId);
   // `--` only when needed: a prompt starting with "-" would otherwise parse as a flag
   if (prompt.startsWith('-')) args.push('--');
@@ -63,7 +64,7 @@ export const opencodeAdapter: AgentAdapter = {
   async send(ctx, prompt) {
     const usage = new UsageTally();
     try {
-      await runCli(ctx, 'opencode', opencodeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+      await runCli(ctx, 'opencode', opencodeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId, ctx.agent.model), line => {
         const ev = parseJson(line);
         if (ev) handleOpencodeEvent(ctx, ev, usage);
         else ctx.emit({ type: 'output', text: line });

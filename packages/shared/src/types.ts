@@ -19,6 +19,22 @@ export interface Agent {
   archivedAt?: number;
   /** a worker working in its own git worktree and branch (cwd is inside `path`) */
   worktree?: Worktree;
+  /** the model the CLI runs with (its own name for it); unset = the CLI's default */
+  model?: string;
+}
+
+/** One model an agent CLI can run with, for the New agent picker. */
+export interface ModelOption {
+  /** what Agentix passes to the CLI's model flag */
+  id: string;
+  /** a friendlier name, when the CLI gives one */
+  label?: string;
+  /** provider or family, to group the list */
+  group?: string;
+  description?: string;
+  /** reasoning levels the model takes (codex), picked as "<id>:<level>" */
+  efforts?: string[];
+  defaultEffort?: string;
 }
 
 export interface Worktree {

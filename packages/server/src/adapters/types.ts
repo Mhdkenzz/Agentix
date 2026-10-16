@@ -11,6 +11,8 @@ export interface AdapterContext {
   signal: AbortSignal;
   /** role instructions (coordinator/CEO) to give before the prompt; set once per session */
   instructions?: string;
+  /** extra environment variables for the CLI process */
+  env?: Record<string, string>;
 }
 
 /** The prompt with role instructions in front, for CLIs without a separate system-prompt flag. */

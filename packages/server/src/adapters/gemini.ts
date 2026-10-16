@@ -20,9 +20,10 @@ import { detectCli, runCli, parseJson, oneLine, emitUsage, count } from './proc.
 
 const APPROVAL = process.env.AGENTIX_GEMINI_APPROVAL || 'auto_edit';
 
-export function geminiArgs(prompt: string, sessionId?: string): string[] {
+export function geminiArgs(prompt: string, sessionId?: string, model?: string): string[] {
   // A leading "-" would make yargs read the prompt as a flag (and -p would have no value).
   const args = ['-p', prompt.startsWith('-') ? ' ' + prompt : prompt, '--output-format', 'stream-json', '--approval-mode', APPROVAL];
+  if (model) args.push('-m', model);
   if (sessionId) args.push('--resume', sessionId);
   return args;
 }
@@ -124,7 +125,7 @@ export const geminiAdapter: AgentAdapter = {
   async send(ctx, prompt) {
     const turn = new GeminiTurn(ctx);
     try {
-      await runCli(ctx, 'gemini', geminiArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+      await runCli(ctx, 'gemini', geminiArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId, ctx.agent.model), line => {
         const ev = parseJson(line);
         if (ev) turn.handle(ev);
         else ctx.emit({ type: 'output', text: line });

@@ -1,17 +1,18 @@
 // Agentix — HTTP server with REST + SSE routes
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join, normalize, extname, sep } from 'node:path';
+import { existsSync, readFileSync, statSync, realpathSync } from 'node:fs';
+import { join, resolve, relative, extname, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { AgentEvent } from '../../shared/src/types.ts';
 import { store } from './store.ts';
 import { EventBus } from './bus.ts';
-import { SessionManager, HttpError } from './sessions.ts';
-import { getAllAdapters } from './adapters/index.ts';
+import { SessionManager, HttpError, cleanModel } from './sessions.ts';
+import { getAllAdapters, getAdapter } from './adapters/index.ts';
+import { listModels, unavailableModelError } from './adapters/models.ts';
 import { getSettings, updateSettings, SettingsError } from './settings.ts';
-import { getBrief, setBrief, listNotes, addNote, deleteNote, searchContextSmart, embed, lastEmbeddingError } from './context.ts';
-import { listTasks } from './tasks.ts';
+import { getBrief, setBrief, listNotes, addNote, deleteNote, clearSharedContext, searchContextSmart, embed, lastEmbeddingError } from './context.ts';
+import { listTasks, clearTasks } from './tasks.ts';
 import { pruneOldEvents } from './retention.ts';
 import { scanClis } from './setup.ts';
 import { historyDir } from './history.ts';
@@ -20,6 +21,14 @@ import { AGENTIX_HOME } from './store.ts';
 export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
 export const HOST = '127.0.0.1';
 const SSE_DEFAULT_REPLAY = 100;
+
+async function requireAvailableModel(kind: string, value: unknown): Promise<string | undefined> {
+  const model = cleanModel(value);
+  if (!model) return undefined;
+  const error = await unavailableModelError(kind, model);
+  if (error) throw new HttpError(400, error);
+  return model;
+}
 
 async function readJson(req: IncomingMessage): Promise<any> {
   let body = '';
@@ -53,12 +62,27 @@ function sendJson(res: ServerResponse, status: number, data: unknown) {
   res.end(body);
 }
 
-const WEB_DIST = process.env.AGENTIX_WEB_DIST || fileURLToPath(new URL('../../web/dist/', import.meta.url));
+const WEB_DIST = resolve(process.env.AGENTIX_WEB_DIST || fileURLToPath(new URL('../../web/dist/', import.meta.url)));
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
   '.map': 'application/json', '.txt': 'text/plain; charset=utf-8',
 };
+
+function decodePathPart(value: string): string {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.includes('\u0000')) throw new Error('NUL byte');
+    return decoded;
+  } catch {
+    throw new HttpError(400, 'Malformed URL encoding');
+  }
+}
+
+function isWithin(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
 
 /** The built dashboard. Unknown paths get index.html so client-side routes (/agents, ...) work on reload. */
 function serveStatic(pathname: string, res: ServerResponse) {
@@ -68,8 +92,17 @@ function serveStatic(pathname: string, res: ServerResponse) {
     res.end('Agentix server is running, but the dashboard is not built. Run: npm install && npm run build\n');
     return;
   }
-  let file = normalize(join(WEB_DIST, decodeURIComponent(pathname)));
-  if (!file.startsWith(WEB_DIST) || !existsSync(file) || !statSync(file).isFile()) file = index;
+  let file = resolve(WEB_DIST, `.${decodePathPart(pathname)}`);
+  if (!isWithin(WEB_DIST, file) || !existsSync(file) || !statSync(file).isFile()) {
+    file = index;
+  } else {
+    // A symlink inside the dashboard must not expose a file outside its root.
+    try {
+      if (!isWithin(realpathSync(WEB_DIST), realpathSync(file))) file = index;
+    } catch {
+      file = index;
+    }
+  }
   const ext = extname(file);
   res.writeHead(200, {
     'Content-Type': MIME[ext] ?? 'application/octet-stream',
@@ -116,22 +149,28 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url!, `http://${req.headers.host ?? HOST}`);
-    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent); // ['api','agents',id,action]
     const method = req.method;
 
     // Only this machine may talk to the server. A Host check blocks DNS rebinding, and an Origin check stops
     // any other website open in the browser from creating or steering agents (no CORS headers are sent).
     if (!isLocalHost(req.headers.host)) return sendJson(res, 403, { error: 'Forbidden host' });
-    if (parts[0] === 'api' && !isLocalOrigin(req.headers.origin)) return sendJson(res, 403, { error: 'Forbidden origin' });
+    const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
+    if (isApi && !isLocalOrigin(req.headers.origin)) return sendJson(res, 403, { error: 'Forbidden origin' });
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     try {
+      const parts = url.pathname.split('/').filter(Boolean).map(decodePathPart); // ['api','agents',id,action]
       if (parts[0] !== 'api') {
         if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
         return serveStatic(url.pathname, res);
       }
 
       const [, resource, id, action, sub] = parts;
+
+      if (resource === 'adapters' && id && action === 'models' && method === 'GET') {
+        if (!getAdapter(id)) throw new HttpError(404, `Unknown agent kind: ${id}`);
+        return sendJson(res, 200, await listModels(id, url.searchParams.get('refresh') === '1'));
+      }
 
       if (resource === 'adapters' && !id && method === 'GET') {
         const adapters = await Promise.all(getAllAdapters().map(async a => ({ kind: a.kind, ...(await a.detect()) })));
@@ -159,6 +198,14 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           try { return sendJson(res, 200, { settings: updateSettings(await readJson(req)) }); }
           catch (e) { if (e instanceof SettingsError) throw new HttpError(400, e.message); throw e; }
         }
+      }
+
+      if (resource === 'reset' && !id && method === 'POST') {
+        await sm.resetWorkspace();
+        clearTasks();
+        clearSharedContext();
+        const settings = updateSettings({ setupDone: false, contextPaths: [] });
+        return sendJson(res, 200, { ok: true, settings });
       }
 
       if (resource === 'context') {
@@ -220,8 +267,9 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         }
         if (method === 'POST') {
           const b = await readJson(req);
+          const model = await requireAvailableModel(b.kind, b.model);
           const agent = sm.createAgent(b.kind, {
-            name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace,
+            name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace, model,
             ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
           });
           return sendJson(res, 201, { agent });
@@ -234,7 +282,15 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           if (!agent) throw new HttpError(404, `Agent ${id} not found`);
           return sendJson(res, 200, { agent });
         }
-        if (method === 'PATCH') return sendJson(res, 200, { agent: sm.updateAgent(id, await readJson(req)) });
+        if (method === 'PATCH') {
+          const b = await readJson(req);
+          if (Object.prototype.hasOwnProperty.call(b, 'model')) {
+            const existing = sm.getAgent(id);
+            if (!existing) throw new HttpError(404, `Agent ${id} not found`);
+            b.model = (await requireAvailableModel(existing.kind, b.model)) ?? null;
+          }
+          return sendJson(res, 200, { agent: sm.updateAgent(id, b) });
+        }
         if (method === 'DELETE') { await sm.removeAgent(id); return sendJson(res, 200, { ok: true }); }
       }
 

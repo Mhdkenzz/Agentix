@@ -3,6 +3,8 @@ import { TMP } from './helpers.ts';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { startServer } from '../src/index.ts';
@@ -60,6 +62,13 @@ test('REST errors: 404, 400, 409', async () => {
   assert.match(dup.body.error, /already the ceo/);
 });
 
+test('malformed URL encoding returns 400 without taking down the server', async () => {
+  const r = await fetch(base + '/api/%');
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /Malformed URL encoding/);
+  assert.equal((await json('/api/agents')).status, 200, 'server remains available');
+});
+
 test('/api/stream delivers named events live; Last-Event-ID resumes', async () => {
   const streaming = collect('/api/stream?tail=0', ms => ms.some(m => m.data.type === 'output'));
   await new Promise(r => setTimeout(r, 100));
@@ -87,6 +96,19 @@ test('serves the dashboard: assets, SPA fallback, no path escape', async () => {
   assert.match(js.headers.get('cache-control')!, /immutable/);
   assert.match(await (await fetch(base + '/history')).text(), /id="root"/, 'client routes get index.html');
   assert.doesNotMatch(await (await fetch(base + '/..%2fsecret.txt')).text(), /nope/);
+
+  // A prefix-only check would allow a sibling such as dist-escape-xyz/secret.txt.
+  const webDist = fileURLToPath(new URL('../../web/dist/', import.meta.url));
+  const outside = mkdtempSync(join(dirname(webDist), 'dist-escape-'));
+  try {
+    writeFileSync(join(outside, 'secret.txt'), 'outside dashboard root');
+    const escaped = `/%2e%2e%2f${basename(outside)}/secret.txt`;
+    const escapedResponse = await fetch(base + escaped);
+    assert.equal(escapedResponse.status, 200);
+    assert.match(await escapedResponse.text(), /id="root"/, 'traversal falls back to the SPA');
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
   assert.equal((await fetch(base + '/', { method: 'POST' })).status, 405);
 });
 
@@ -153,4 +175,20 @@ test('a second server on the same port fails cleanly without touching agents', a
   await assert.rejects(startServer(port), /already in use/);
   const now = (await json(`/api/agents/${body.agent.id}`)).body.agent.status;
   assert.notEqual(now, 'idle', 'a failed second server must not reset the live one');
+});
+
+test('reset starts a clean first-run workspace', async () => {
+  await json('/api/context/brief', 'PUT', { text: 'old brief' });
+  await json('/api/context/notes', 'POST', { text: 'old note' });
+  await json('/api/tasks', 'POST', { title: 'old task' });
+  await json('/api/agents', 'POST', { kind: 'mock', name: 'Reset me' });
+
+  const reset = await json('/api/reset', 'POST');
+  assert.equal(reset.status, 200);
+  assert.equal(reset.body.settings.setupDone, false);
+  assert.deepEqual((await json('/api/agents')).body.agents, []);
+  assert.deepEqual((await json('/api/tasks')).body.tasks, []);
+  const context = (await json('/api/context')).body;
+  assert.equal(context.brief, '');
+  assert.deepEqual(context.notes, []);
 });

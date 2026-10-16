@@ -11,10 +11,13 @@ import { detectCli, runCli, parseJson, oneLine, emitUsage } from './proc.ts';
 
 const SANDBOX = process.env.AGENTIX_CODEX_SANDBOX || 'workspace-write';
 
-export function codexArgs(cwd: string, prompt: string, sessionId?: string): string[] {
+export function codexArgs(cwd: string, prompt: string, sessionId?: string, model?: string): string[] {
+  // -c works for both exec and exec resume (resume has no -m). "<model>:<effort>" also sets the reasoning level.
+  const [name, effort] = (model ?? '').split(':');
+  const m = [...(name ? ['-c', `model="${name}"`] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : [])];
   return sessionId
-    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${SANDBOX}"`, '--', sessionId, prompt]
-    : ['exec', '--json', '--skip-git-repo-check', '-s', SANDBOX, '-C', cwd, '--', prompt];
+    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${SANDBOX}"`, ...m, '--', sessionId, prompt]
+    : ['exec', '--json', '--skip-git-repo-check', '-s', SANDBOX, '-C', cwd, ...m, '--', prompt];
 }
 
 export function handleCodexEvent(ctx: AdapterContext, ev: any): void {
@@ -84,7 +87,7 @@ export const codexAdapter: AgentAdapter = {
   detect: () => detectCli('codex'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'codex', codexArgs(ctx.agent.cwd, withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+    await runCli(ctx, 'codex', codexArgs(ctx.agent.cwd, withInstructions(ctx, prompt), ctx.agent.nativeSessionId, ctx.agent.model), line => {
       const ev = parseJson(line);
       if (ev) handleCodexEvent(ctx, ev);
       else ctx.emit({ type: 'output', text: line });

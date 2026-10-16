@@ -53,7 +53,7 @@ export function runCli(
     const child = spawn(cliPath(cmd), args, {
       cwd: ctx.agent.cwd,
       // PWD too: some CLIs (opencode) trust $PWD over the real cwd, and ours is the server's
-      env: { ...process.env, PWD: ctx.agent.cwd },
+      env: { ...process.env, ...ctx.env, PWD: ctx.agent.cwd },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // own process group, so we can stop the CLI's children too
     });

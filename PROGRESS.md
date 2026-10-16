@@ -12,7 +12,7 @@ node --test packages/server/test/*.test.ts       # uses a temp AGENTIX_HOME, nev
 ```
 
 Env vars: `AGENTIX_PORT` (default 4317), `AGENTIX_URL` (CLI), `AGENTIX_HOME` (default `~/.agentix`),
-`AGENTIX_STORE=json` (force the JSON fallback), `AGENTIX_CODEX_SANDBOX`, `AGENTIX_UPDATE_DELAY_MS`
+`AGENTIX_STORE=json` (force the JSON fallback), `AGENTIX_CODEX_SANDBOX`, `AGENTIX_UPDATE_DELAY_MS`, `AGENTIX_CEO_REPLY_TIMEOUT_MS`
 (coordinator batching, default 5000).
 
 The mock agent kind is for tests only: it is hidden unless `AGENTIX_MOCK=1` (the test helpers set it).
@@ -115,6 +115,8 @@ mounts a throwaway one first.
   after a role change). CLI adapters put it in front of the prompt (`withInstructions`); mock ignores it.
 - **CEO digest**: every CEO turn starts with `[TEAM STATUS]` (all agents, status, activity, last output),
   then `[FROM KENZ]` and kenz's words. Coordinator → CEO messages are queued while the CEO is busy.
+- **CEO request watchdog**: a CEO request with no coordinator reply gets two queued, non-interrupting follow-ups;
+  after three unanswered requests, Agentix reports the issue without interrupting the active run.
 - **Coordinator modes** (`GET/PUT /api/settings`, top-bar selector, `~/.agentix/settings.json`):
   `human` (kenz coordinates; no updates, coordinator commands ignored), `agent` (the dashboard sends kenz's
   worker instructions to the coordinator via `POST /api/coordinator/ask`), `both` (default).
@@ -206,3 +208,8 @@ CI runs them after the dashboard build check and uploads `playwright-report/` wh
 - Smarter memory: optional local embeddings through Ollama, fused with BM25. Settings has a Test button; the
   Context page shows which search ran.
 - New adapters: Gemini CLI, Aider, Goose (written from their docs, not yet run against the real CLIs).
+
+## Model picker (2026-10-16)
+- New agent, setup (coordinator and CEO) and every agent's panel / Agents row let you pick the model, from the list
+  each CLI gives (Codex catalog with reasoning levels, OpenCode and Pi provider lists with search, Claude aliases,
+  Hermes' configured default) or typed by hand. Empty keeps the CLI's own default. `@@spawn ... model=` too.

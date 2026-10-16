@@ -24,6 +24,7 @@ export function Settings() {
   const [error, setError] = useState('');
   const [emb, setEmb] = useState<ServerSettings['embeddings']>();
   const [embTest, setEmbTest] = useState<string>();
+  const [resetBusy, setResetBusy] = useState(false);
 
   const detect = () => api.adapters().then(setAdapters).catch(e => setError(String(e.message ?? e)));
   useEffect(() => { detect(); }, []);
@@ -43,6 +44,18 @@ export function Settings() {
     try { setServerSettings(await api.saveSettings(patch)); setSaved(what); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
   function saveLocal(next: typeof local) { setLocal(next); saveSettings(next); }
+
+  async function startFresh() {
+    if (!window.confirm('Start fresh? This stops all agents and permanently removes agents, tasks, shared context, usage, and history. Your CLI settings are kept.')) return;
+    setResetBusy(true); setError('');
+    try {
+      await api.resetWorkspace();
+      window.location.assign('/setup');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setResetBusy(false);
+    }
+  }
 
   if (!server) return <div className="page"><h1>Settings</h1><p className="muted">Connecting to the server…</p></div>;
 
@@ -167,6 +180,12 @@ export function Settings() {
       <section className="card">
         <h2>Server</h2>
         <p className="small">Dashboard and API: <span className="mono">{window.location.origin}</span>. Change the port by starting the server with <span className="mono">AGENTIX_PORT=4318 agentix server</span>. Data lives in <span className="mono">~/.agentix</span> (or <span className="mono">AGENTIX_HOME</span>).</p>
+      </section>
+
+      <section className="card reset-card">
+        <h2>Start fresh</h2>
+        <p className="muted small">Stop every agent and return to the first-run setup. This permanently removes the current agents, tasks, shared context, usage totals, and history. CLI paths and other server preferences stay saved.</p>
+        <button className="btn danger" disabled={resetBusy} onClick={startFresh}>{resetBusy ? 'Resetting…' : 'Stop everything and start fresh'}</button>
       </section>
     </div>
   );

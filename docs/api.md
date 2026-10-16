@@ -8,6 +8,21 @@ The server listens on 127.0.0.1 only and answers only requests for this machine:
 
 All routes are relative to `http://127.0.0.1:4317` (`AGENTIX_PORT` changes the port).
 
+### GET `/api/adapters/:kind/models[?refresh=1]`
+
+The models a CLI can run with, for the model picker: `{ models: [{ id, label?, group?, description?, efforts?, defaultEffort? }], current?, error? }`.
+`current` is the CLI's configured default when Agentix can read it. Cached for 10 minutes.
+
+| Kind | Listed from | Model flag |
+|---|---|---|
+| codex | `codex debug models` (or `~/.codex/models_cache.json`), hidden models left out | `-c model="…"` (+ `-c model_reasoning_effort="…"`) |
+| opencode | `opencode models` (provider/model per line) | `-m provider/model` |
+| pi | `pi --list-models` | `--model provider/id` |
+| claude | the aliases fable, opus, sonnet, haiku | `--model` |
+| hermes | its configured default (`~/.hermes/config.yaml`) | `-m` |
+| gemini, aider | none (type a name) | `-m` / `--model` |
+| goose | none (type a name) | `GOOSE_MODEL` |
+
 ### GET `/api/adapters`
 
 Returns which agent CLIs are installed and their versions.
@@ -65,13 +80,16 @@ Create a new agent.
   "cwd": "/path/to/project",
   "prompt": "fix the failing test",
   "replace": false,
-  "worktree": true
+  "worktree": true,
+  "model": "gpt-6.1-sol:high"
 }
 ```
 
 Only `kind` is required. `role` defaults to `worker`, `avatarId` to `"random"` (or 0–9), `cwd` to
 `~/.agentix/workspace` (must be absolute; created if missing). With `prompt`, the first turn starts at once.
-A worker whose `cwd` is inside a git repository gets its own worktree and branch (see Worktrees) unless
+`model` is passed to the CLI's model flag on every turn (empty = the CLI's own default); for Codex,
+`<model>:<level>` also sets the reasoning level. `PATCH /api/agents/:id` takes `model` too (`null` or `""` clears
+it), used from the agent's next turn. A worker whose `cwd` is inside a git repository gets its own worktree and branch (see Worktrees) unless
 `"worktree": false` or the `worktrees` setting is off.
 
 **Response:** `201` with the created agent. `400` for an unknown kind/role/avatar, `409` if a
@@ -200,7 +218,7 @@ on the coordinator and delivered in its next `[AGENTIX UPDATE]`. `409` if there 
 Lines in a coordinator's output (the server runs them; see `server/src/commands.ts`):
 
 ```
-@@spawn kind=codex name=Rook avatar=random cwd=/abs/path :: <task>
+@@spawn kind=codex name=Rook avatar=random cwd=/abs/path model=gpt-6-sol :: <task>
 @@steer <agent id or name> :: <instructions>
 @@stop <agent id or name>
 @@tell ceo :: <report>
@@ -211,6 +229,9 @@ Lines in a coordinator's output (the server runs them; see `server/src/commands.
 
 The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`
 and `@@task <id> status=... note=...` for their own tasks. `@@spawn ... worktree=no` skips the worktree. Every CEO turn starts with a `[TEAM STATUS]` digest.
+After a CEO request, Agentix waits for a coordinator reply, sends up to two non-interrupting follow-ups,
+and reports an issue after three unanswered requests. The timeout is 30 seconds by default and can be adjusted
+with `AGENTIX_CEO_REPLY_TIMEOUT_MS`. A coordinator response clears the watchdog.
 
 ### GET `/api/stream`
 

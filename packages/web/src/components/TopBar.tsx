@@ -1,7 +1,9 @@
-// Page links, live counts by status, connection dot, "+ New agent".
-import { NavLink } from 'react-router-dom';
+// Page links, live counts by status, session switching, connection dot, "+ New agent".
+import { useState } from 'react';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { useStore, fmtTokens, fmtCost } from '../store.ts';
 import { api, type CoordinatorMode } from '../api.ts';
+import { NewSessionModal } from './NewSessionModal.tsx';
 
 const MODE_LABEL: Record<CoordinatorMode, string> = { human: 'You coordinate', agent: 'Agent coordinates', both: 'You + agent' };
 
@@ -27,8 +29,14 @@ const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/tasks
 export function TopBar() {
   const agents = useStore(s => s.agents);
   const connected = useStore(s => s.connected);
+  const select = useStore(s => s.select);
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
+  const navigate = useNavigate();
+  const [showNewSession, setShowNewSession] = useState(false);
   const list = Object.values(agents);
+  const activeSessions = list
+    .filter(agent => agent.nativeSessionId && agent.status !== 'stopped')
+    .sort((a, b) => a.name.localeCompare(b.name));
   const count = (pred: (s: string) => boolean) => list.filter(a => pred(a.status)).length;
   const busy = count(s => s === 'thinking' || s === 'working' || s === 'starting');
   const waiting = count(s => s === 'waiting_input');
@@ -38,7 +46,7 @@ export function TopBar() {
   const costToday = Object.values(usageToday).reduce((n, u) => n + (u.cost ?? 0), 0);
   return (
     <nav className="topbar">
-      <div className="brand"><span className="logo">A</span>Agentix</div>
+      <div className="brand">Agentix</div>
       <div className="links">
         {PAGES.map(([to, label]) => <NavLink key={to} to={to} end={to === '/'}>{label}</NavLink>)}
       </div>
@@ -52,7 +60,29 @@ export function TopBar() {
         {errors > 0 && <span className="c-err">● {errors} error</span>}
         <span className={connected ? 'c-on' : 'c-off'} title={connected ? 'live' : 'reconnecting to the server…'}>{connected ? 'live' : 'offline'}</span>
       </div>
-      <button className="btn primary" onClick={() => setShowNewAgent(true)}>+ New agent</button>
+      <div className="session-controls">
+        <select
+          className="session-select"
+          aria-label="Active sessions"
+          value=""
+          disabled={!activeSessions.length}
+          onChange={e => {
+            if (!e.target.value) return;
+            select(e.target.value);
+            navigate('/');
+          }}
+        >
+          <option value="">{activeSessions.length ? `Active sessions (${activeSessions.length})` : 'No active sessions'}</option>
+          {activeSessions.map(agent => (
+            <option key={agent.id} value={agent.id}>
+              {agent.name} · {agent.kind} · {agent.status}
+            </option>
+          ))}
+        </select>
+        <button className="btn" onClick={() => setShowNewSession(true)}>+ New session</button>
+        <button className="btn primary" onClick={() => setShowNewAgent(true)}>+ New agent</button>
+      </div>
+      {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}
     </nav>
   );
 }

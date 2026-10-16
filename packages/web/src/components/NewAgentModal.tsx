@@ -4,6 +4,7 @@ import { api, ApiError, type AdapterInfo } from '../api.ts';
 import { AVATARS } from '../avatars/index.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { useStore } from '../store.ts';
+import { ModelPicker } from './ModelPicker.tsx';
 import type { Role } from '../../../shared/src/types.ts';
 
 export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): void; initialRole?: Role }) {
@@ -14,6 +15,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState(server?.defaultCwd ?? '');
   const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState('');
   const [worktree, setWorktree] = useState(server?.worktrees ?? true);
   const [avatar, setAvatar] = useState<number | 'random'>('random');
   const [error, setError] = useState('');
@@ -32,7 +34,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   async function submit(replace = false) {
     setBusy(true); setError(''); setConflict(undefined);
     try {
-      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace, ...(role === 'worker' ? { worktree } : {}) });
+      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace, model: model || undefined, ...(role === 'worker' ? { worktree } : {}) });
       select(agent.id);
       onClose();
     } catch (e) {
@@ -47,7 +49,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
         <h2>New agent</h2>
         <div className="grid2">
           <label>Agent
-            <select value={kind} onChange={e => setKind(e.target.value)}>
+            <select value={kind} onChange={e => { setKind(e.target.value); setModel(''); }}>
               {adapters.map(a => (
                 <option key={a.kind} value={a.kind} disabled={!a.installed}>
                   {a.kind}{a.installed ? (a.version && a.version !== a.kind ? ` (${a.version})` : '') : ' (not installed)'}
@@ -65,6 +67,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
           <label>Name <input value={name} onChange={e => setName(e.target.value)} placeholder="random" /></label>
           <label>Working folder <input value={cwd} onChange={e => setCwd(e.target.value)} placeholder="~/.agentix/workspace" /></label>
         </div>
+        <ModelPicker kind={kind} value={model} onChange={setModel} />
         {role === 'worker' && (
           <label className="check wt-check" title="Only when the folder is inside a git repository">
             <input type="checkbox" checked={worktree} onChange={e => setWorktree(e.target.checked)} />

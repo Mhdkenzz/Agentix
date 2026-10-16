@@ -5,7 +5,7 @@
 //
 // The database is what the server reads; these files are an append-only copy that survives removing an
 // agent, a broken database, or a reinstall, and can be read with any tool (jq, grep, an editor).
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Agent } from '../../shared/src/types.ts';
 import type { IStore } from './store.ts';
@@ -39,6 +39,11 @@ export function withHistory(base: IStore, home: string): IStore {
       const full = base.appendEvent(e, agentId);
       append(`${safeId(agentId)}.jsonl`, full);
       return full;
+    },
+    reset: () => {
+      base.reset();
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort; the database is already reset */ }
+      try { mkdirSync(dir, { recursive: true }); } catch { /* reported on the next history write */ }
     },
   };
 }
