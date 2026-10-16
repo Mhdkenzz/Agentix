@@ -123,7 +123,7 @@ test('workers get the [SHARED CONTEXT] block and can add to it with @@remember',
   const search = await json('/api/context/search?q=deploy%20staging');
   assert.equal(search.body.hits[0].source, 'file');
 
-  const block = sharedContextBlock(sm.getAgents()[0] ?? ({ id: 'x' } as any), 'deploy to staging');
+  const block = await sharedContextBlock(sm.getAgents()[0] ?? ({ id: 'x' } as any), 'deploy to staging');
   assert.match(block, /todo app/);
   assert.match(block, /ship\.sh --staging/);
 

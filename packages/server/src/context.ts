@@ -6,9 +6,10 @@
 // Before each worker or coordinator turn, the task is used as a query for a BM25 keyword search over the
 // notes, the output of every other agent and the text files in settings.contextPaths. The brief and the
 // best matches go in front of the prompt as a [SHARED CONTEXT] block, so agents build on each other's work.
+// With embeddings on (Settings: a local Ollama), the search also matches by meaning, not only by words.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, renameSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import type { Agent } from '../../shared/src/types.ts';
 import { store, AGENTIX_HOME } from './store.ts';
 import { getSettings } from './settings.ts';
@@ -168,14 +169,13 @@ export interface SearchOptions {
   sources?: Hit['source'][];
 }
 
-/** BM25 keyword search over notes, agent outputs and indexed files. */
-export function searchContext(query: string, opts: SearchOptions = {}): Hit[] {
-  const terms = [...new Set(tokenize(query))];
-  if (!terms.length) return [];
+type Doc = Omit<Hit, 'score'>;
+
+/** Everything the search looks at: notes, recent agent outputs and the indexed files, in chunks. */
+function collectDocs(opts: SearchOptions): Doc[] {
   const sources = new Set(opts.sources ?? ['note', 'output', 'file']);
   const names = new Map(store.getAllAgents().map(a => [a.id, a.name]));
-  const docs: Omit<Hit, 'score'>[] = [];
-
+  const docs: Doc[] = [];
   if (sources.has('note')) {
     for (const n of listNotes()) {
       docs.push({ source: 'note', title: `note by ${n.from === 'user' ? 'kenz' : names.get(n.from) ?? n.from}`, text: n.text, ts: n.ts, noteId: n.id, agentId: n.from });
@@ -194,40 +194,135 @@ export function searchContext(query: string, opts: SearchOptions = {}): Hit[] {
     for (const root of getSettings().contextPaths) walk(root, files);
     for (const f of files) for (const c of fileChunks(f)) docs.push({ source: 'file', title: f, text: c, path: f });
   }
-  if (!docs.length) return [];
+  return docs;
+}
 
-  // BM25 (k1 = 1.2, b = 0.75)
+/** BM25 (k1 = 1.2, b = 0.75) scores, one per doc; 0 where no query term occurs. */
+function bm25(docs: Doc[], query: string): number[] {
+  const terms = [...new Set(tokenize(query))];
+  if (!terms.length || !docs.length) return docs.map(() => 0);
   const toks = docs.map(d => tokenize(d.source === 'file' ? `${basename(d.path!)} ${d.text}` : d.text));
   const avg = toks.reduce((s, t) => s + t.length, 0) / toks.length || 1;
   const df = new Map<string, number>();
   for (const t of toks) for (const term of new Set(t)) if (terms.includes(term)) df.set(term, (df.get(term) ?? 0) + 1);
   const N = docs.length;
-  const hits: Hit[] = [];
-  toks.forEach((t, i) => {
+  return toks.map((t, i) => {
     const tf = new Map<string, number>();
     for (const term of t) if (df.has(term)) tf.set(term, (tf.get(term) ?? 0) + 1);
     let score = 0;
     for (const [term, f] of tf) {
       const n = df.get(term)!;
-      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
-      score += idf * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * t.length / avg));
+      score += Math.log(1 + (N - n + 0.5) / (n + 0.5)) * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * t.length / avg));
     }
     // notes are facts agents chose to share: rank them a little higher
-    if (score > 0) hits.push({ ...docs[i], score: docs[i].source === 'note' ? score * 1.3 : score });
+    return docs[i].source === 'note' ? score * 1.3 : score;
   });
-  hits.sort((a, b) => b.score - a.score || (b.ts ?? 0) - (a.ts ?? 0));
+}
 
-  // one hit per output event or file chunk is enough; avoid repeating the same event's chunks
+/** Best first, one hit per output event or file chunk, scores rounded. */
+function pick(docs: Doc[], scores: number[], limit: number): Hit[] {
+  const order = docs.map((d, i) => ({ ...d, score: scores[i] })).filter(h => h.score > 0)
+    .sort((a, b) => b.score - a.score || (b.ts ?? 0) - (a.ts ?? 0));
   const seen = new Set<string>();
   const out: Hit[] = [];
-  for (const h of hits) {
+  for (const h of order) {
     const key = h.eventId != null ? `e${h.eventId}` : h.noteId ?? `${h.path}:${h.text.slice(0, 40)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ ...h, score: Math.round(h.score * 100) / 100 });
-    if (out.length >= (opts.limit ?? 10)) break;
+    out.push({ ...h, score: Math.round(h.score * 1000) / 1000 });
+    if (out.length >= limit) break;
   }
   return out;
+}
+
+/** Keyword (BM25) search over notes, agent outputs and indexed files. */
+export function searchContext(query: string, opts: SearchOptions = {}): Hit[] {
+  const docs = collectDocs(opts);
+  return pick(docs, bm25(docs, query), opts.limit ?? 10);
+}
+
+// ---------- optional semantic search (embeddings from a local Ollama) ----------
+
+const EMBED_BATCH = 32;
+const EMBED_NEW_PER_SEARCH = 96;   // bounds the first searches; the rest is embedded by later ones
+const EMBED_TIMEOUT_MS = 15_000;
+const embedFile = () => join(dir(), 'embeddings.jsonl');
+let embedCache: Map<string, number[]> | undefined;
+let embedModel = '';
+
+const hashText = (model: string, text: string) => createHash('sha1').update(model + '\0' + text).digest('hex');
+
+function loadEmbeddings(model: string): Map<string, number[]> {
+  if (embedCache && embedModel === model) return embedCache;
+  embedCache = new Map();
+  embedModel = model;
+  try {
+    for (const line of readFileSync(embedFile(), 'utf8').split('\n')) {
+      if (!line) continue;
+      try { const r = JSON.parse(line); if (r.m === model) embedCache.set(r.h, r.v); } catch { /* torn line */ }
+    }
+  } catch { /* none yet */ }
+  return embedCache;
+}
+
+/** Vectors for `texts` from Ollama's /api/embed. */
+export async function embed(texts: string[]): Promise<number[][]> {
+  const { url, model } = getSettings().embeddings;
+  const res = await fetch(`${url}/api/embed`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, input: texts }), signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json() as { embeddings?: number[][] };
+  if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length) throw new Error('Ollama returned no embeddings');
+  return data.embeddings;
+}
+
+function cosine(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length && i < b.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+}
+
+export let lastEmbeddingError = '';
+
+/**
+ * Hybrid search: BM25 plus embeddings, merged by reciprocal rank, so "auth" also finds a note about "login".
+ * Falls back to keyword search when embeddings are off or Ollama can't be reached.
+ */
+export async function searchContextSmart(query: string, opts: SearchOptions = {}): Promise<Hit[]> {
+  const settings = getSettings().embeddings;
+  if (settings.provider !== 'ollama' || !tokenize(query).length) return searchContext(query, opts);
+  const docs = collectDocs(opts);
+  const keyword = bm25(docs, query);
+  try {
+    const cache = loadEmbeddings(settings.model);
+    const keys = docs.map(d => hashText(settings.model, d.text));
+    // newest first, so recent work and notes get embedded before old output
+    const missing = [...new Set(docs.map((d, i) => ({ i, ts: d.source === 'note' ? Infinity : d.ts ?? 0 }))
+      .sort((a, b) => b.ts - a.ts).map(x => x.i).filter(i => !cache.has(keys[i])))].slice(0, EMBED_NEW_PER_SEARCH);
+    const [qv] = await embed([query.slice(0, 4000)]);
+    for (let b = 0; b < missing.length; b += EMBED_BATCH) {
+      const batch = missing.slice(b, b + EMBED_BATCH);
+      const vecs = await embed(batch.map(i => docs[i].text));
+      mkdirSync(dir(), { recursive: true });
+      appendFileSync(embedFile(), batch.map((i, j) => { cache.set(keys[i], vecs[j]); return JSON.stringify({ m: settings.model, h: keys[i], v: vecs[j] }); }).join('\n') + '\n');
+    }
+    const semantic = docs.map((_, i) => { const v = cache.get(keys[i]); return v ? cosine(qv, v) : 0; });
+    // reciprocal rank fusion (k = 60); a weak semantic match (< 0.35) doesn't count
+    const rank = (scores: number[], min: number) => {
+      const r = new Map<number, number>();
+      scores.map((s, i) => ({ s, i })).filter(x => x.s > min).sort((a, b) => b.s - a.s).forEach((x, n) => r.set(x.i, n));
+      return r;
+    };
+    const rk = rank(keyword, 0), rs = rank(semantic, 0.35);
+    const fused = docs.map((_, i) => (rk.has(i) ? 1 / (60 + rk.get(i)!) : 0) + (rs.has(i) ? 1 / (60 + rs.get(i)!) : 0));
+    lastEmbeddingError = '';
+    return pick(docs, fused, opts.limit ?? 10).map(h => ({ ...h, score: Math.round(h.score * 10000) / 100 }));
+  } catch (err: any) {
+    lastEmbeddingError = err?.message ?? String(err);
+    return pick(docs, keyword, opts.limit ?? 10);
+  }
 }
 
 // ---------- the block in front of a prompt ----------
@@ -238,13 +333,13 @@ const clip = (s: string, n: number) => {
 };
 
 /** The [SHARED CONTEXT] block for an agent's next turn, or '' when shared context is off. */
-export function sharedContextBlock(agent: Agent, prompt: string): string {
+export async function sharedContextBlock(agent: Agent, prompt: string): Promise<string> {
   if (!getSettings().sharedContext) return '';
   const lines: string[] = ['[SHARED CONTEXT] The team\'s shared memory, from Agentix. Use what helps, ignore the rest.'];
   const brief = getBrief().trim();
   if (brief) lines.push('Team brief:', brief.length > BLOCK_BRIEF_CHARS ? brief.slice(0, BLOCK_BRIEF_CHARS) + '…' : brief);
 
-  let hits = searchContext(prompt, { limit: BLOCK_HITS, excludeAgentId: agent.id });
+  let hits = await searchContextSmart(prompt, { limit: BLOCK_HITS, excludeAgentId: agent.id });
   if (!hits.some(h => h.source === 'note')) {
     // nothing matched in the notes: still show the latest few, they are usually team-wide facts
     const recent = listNotes().slice(-3).reverse().map(n => ({ source: 'note' as const, title: 'recent note', text: n.text, score: 0 }));

@@ -28,10 +28,8 @@ export interface Worktree {
   path: string;
   /** e.g. agentix/rook-a_12ab34 */
   branch: string;
-  /** commit the branch started from */
+  /** changes are counted from this commit (where the branch started, or its last merge) */
   base: string;
-  /** set once merged or discarded */
-  state?: 'merged' | 'discarded';
 }
 
 /** Token use of one turn (or a running total), as reported by the CLI. */

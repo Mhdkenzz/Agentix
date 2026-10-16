@@ -10,7 +10,9 @@ import { EventBus } from './bus.ts';
 import { SessionManager, HttpError } from './sessions.ts';
 import { getAllAdapters } from './adapters/index.ts';
 import { getSettings, updateSettings, SettingsError } from './settings.ts';
-import { getBrief, setBrief, listNotes, addNote, deleteNote, searchContext } from './context.ts';
+import { getBrief, setBrief, listNotes, addNote, deleteNote, searchContextSmart, embed, lastEmbeddingError } from './context.ts';
+import { listTasks } from './tasks.ts';
+import { pruneOldEvents } from './retention.ts';
 import { scanClis } from './setup.ts';
 import { historyDir } from './history.ts';
 import { AGENTIX_HOME } from './store.ts';
@@ -129,7 +131,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         return serveStatic(url.pathname, res);
       }
 
-      const [, resource, id, action] = parts;
+      const [, resource, id, action, sub] = parts;
 
       if (resource === 'adapters' && !id && method === 'GET') {
         const adapters = await Promise.all(getAllAdapters().map(async a => ({ kind: a.kind, ...(await a.detect()) })));
@@ -178,11 +180,30 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         }
         if (id === 'search' && method === 'GET') {
           const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 10, 1), 50);
-          return sendJson(res, 200, { hits: searchContext(url.searchParams.get('q') ?? '', { limit }) });
+          const hits = await searchContextSmart(url.searchParams.get('q') ?? '', { limit });
+          return sendJson(res, 200, { hits, embeddingError: lastEmbeddingError || undefined });
+        }
+        if (id === 'embeddings' && action === 'test' && method === 'POST') {
+          try {
+            const [v] = await embed(['Agentix embedding test']);
+            return sendJson(res, 200, { ok: true, dimensions: v.length });
+          } catch (e: any) { return sendJson(res, 200, { ok: false, error: e?.message ?? String(e) }); }
         }
       }
 
       if (resource === 'setup' && id === 'scan' && method === 'GET') return sendJson(res, 200, await scanClis());
+
+      if (resource === 'usage' && !id && method === 'GET') {
+        const day = new Date(); day.setHours(0, 0, 0, 0);
+        return sendJson(res, 200, { total: store.usageTotals(), today: store.usageTotals(day.getTime()) });
+      }
+
+      if (resource === 'tasks') {
+        if (!id && method === 'GET') return sendJson(res, 200, { tasks: listTasks() });
+        if (!id && method === 'POST') return sendJson(res, 201, { task: sm.addTask(await readJson(req)) });
+        if (id && !action && method === 'PATCH') return sendJson(res, 200, { task: sm.editTask(id, await readJson(req)) });
+        if (id && !action && method === 'DELETE') { sm.removeTask(id); return sendJson(res, 200, { ok: true }); }
+      }
 
       if (resource === 'coordinator' && id === 'ask' && method === 'POST') {
         const b = await readJson(req);
@@ -201,6 +222,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           const b = await readJson(req);
           const agent = sm.createAgent(b.kind, {
             name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace,
+            ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
           });
           return sendJson(res, 201, { agent });
         }
@@ -224,6 +246,11 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (action === 'interrupt' && method === 'POST') {
           await sm.interruptAgent(id);
           return sendJson(res, 200, { ok: true });
+        }
+        if (action === 'worktree') {
+          if (!sub && method === 'GET') return sendJson(res, 200, sm.getWorktree(id));
+          if (sub === 'merge' && method === 'POST') return sendJson(res, 200, sm.mergeWorktree(id));
+          if (sub === 'discard' && method === 'POST') { sm.discardWorktree(id); return sendJson(res, 200, { ok: true }); }
         }
         if (action === 'session' && method === 'POST') {
           const b = await readJson(req);
@@ -261,6 +288,11 @@ export function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sess
       // Agents that were mid-turn when the server last stopped can't still be running.
       // (Only after binding, so a second server that fails to start can't touch the live one's agents.)
       store.resetBusyAgents();
+      // Old events leave the database now and every 6 hours (the history files keep them).
+      pruneOldEvents();
+      const prune = setInterval(pruneOldEvents, 6 * 3600_000);
+      prune.unref();
+      server.once('close', () => clearInterval(prune));
       const addr = server.address();
       resolve({ server, sessionManager, port: typeof addr === 'object' && addr ? addr.port : port });
     });
