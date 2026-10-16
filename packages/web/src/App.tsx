@@ -11,6 +11,7 @@ import { Settings } from './pages/Settings.tsx';
 import { Ceo } from './pages/Ceo.tsx';
 import { Context } from './pages/Context.tsx';
 import { Setup } from './pages/Setup.tsx';
+import { Tasks } from './pages/Tasks.tsx';
 
 export function App() {
   const showNewAgent = useStore(s => s.showNewAgent);
@@ -46,6 +47,8 @@ export function App() {
     }).catch(() => { setConnected(false); retry = setTimeout(start, 2000); });
     start();
     api.settings().then(useStore.getState().setServerSettings).catch(() => {});
+    api.tasks().then(useStore.getState().setTasks).catch(() => {});
+    api.usage().then(u => useStore.getState().setUsage(u.total, u.today)).catch(() => {});
     return () => { cancelled = true; clearTimeout(retry); stop(); };
   }, []);
 
@@ -63,6 +66,7 @@ export function App() {
           <Route path="/history" element={<History />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/context" element={<Context />} />
+          <Route path="/tasks" element={<Tasks />} />
           <Route path="/setup" element={<Setup />} />
         </Routes>
       </main>

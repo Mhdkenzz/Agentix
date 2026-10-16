@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api.ts';
-import { useStore } from '../store.ts';
+import { useStore, fmtTokens, fmtCost } from '../store.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { AVATARS } from '../avatars/index.ts';
 import type { Agent, Role } from '../../../shared/src/types.ts';
@@ -12,6 +12,7 @@ const BUSY = ['thinking', 'working', 'starting'];
 export function Agents() {
   const agents = useStore(s => s.agents);
   const select = useStore(s => s.select);
+  const usage = useStore(s => s.usage);
   const navigate = useNavigate();
   const [role, setRole] = useState('');
   const [kind, setKind] = useState('');
@@ -77,7 +78,7 @@ export function Agents() {
             <tr>
               <th><input type="checkbox" checked={!!rows.length && chosen.length === rows.length}
                 onChange={e => setPicked(e.target.checked ? new Set(rows.map(a => a.id)) : new Set())} aria-label="Select all" /></th>
-              <th>Agent</th><th>Kind</th><th>Role</th><th>Avatar</th><th>Status</th><th>Doing</th><th>Folder</th><th></th>
+              <th>Agent</th><th>Kind</th><th>Role</th><th>Avatar</th><th>Status</th><th>Doing</th><th title="All-time tokens (input + output)">Tokens</th><th>Cost</th><th>Folder</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -108,7 +109,10 @@ export function Agents() {
                 </td>
                 <td><span className={`st st-${a.status}`}>{a.status}</span></td>
                 <td className="ellipsis" title={a.activity}>{a.activity}</td>
-                <td className="ellipsis mono small" title={a.cwd}>{a.cwd}</td>
+                <td className="num" title={usage[a.id] ? `${usage[a.id].turns} turns · ${usage[a.id].input.toLocaleString()} in · ${usage[a.id].output.toLocaleString()} out` : 'no usage reported yet'}>
+                  {usage[a.id] ? fmtTokens(usage[a.id].input + usage[a.id].output) : <span className="muted">–</span>}</td>
+                <td className="num">{fmtCost(usage[a.id]?.cost) || <span className="muted">–</span>}</td>
+                <td className="ellipsis mono small" title={a.worktree ? `${a.cwd}\nbranch ${a.worktree.branch}` : a.cwd}>{a.worktree && <span className="branch-tag">⎇</span>}{a.cwd}</td>
                 <td>
                   <div className="row">
                     <button className="btn small" onClick={() => { select(a.id); navigate('/'); }}>Watch</button>
@@ -117,7 +121,7 @@ export function Agents() {
                 </td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan={9} className="muted pad">No agents match.</td></tr>}
+            {!rows.length && <tr><td colSpan={11} className="muted pad">No agents match.</td></tr>}
           </tbody>
         </table>
       </div>

@@ -176,3 +176,33 @@ mounts a throwaway one first.
   the workers. "Run setup again" in Settings.
 - Checked: 52 server tests; the whole setup flow in headless Chromium with fake CLIs (coordinator spawned two
   workers and saved a note; Clear, Context search and a removed agent in History all worked, no page errors).
+
+## Browser tests
+
+Playwright drives the built dashboard (`packages/web/dist`) against a real server, so rebuild after web changes.
+Fake `claude` and `codex` CLIs in `e2e/fakebin` stand in for the agents (no model calls). The server runs on
+port 4391 (`E2E_PORT`) with a wiped `$TMPDIR/agentix-e2e` home (`E2E_AGENTIX_HOME`, folder name must contain
+"e2e") and `AGENTIX_UPDATE_DELAY_MS=300`. One worker: the tests share the server and run in order (setup, CEO
+chat + Clear, Context, History with a removed agent, Office + Agents, foreign Origin gets 403).
+
+```bash
+npm ci
+npx playwright install --with-deps chromium     # once; CI does this
+npm run e2e
+PW_CHROMIUM=/opt/pw-browsers/chromium npm run e2e   # this machine: use the preinstalled Chromium instead
+```
+
+CI runs them after the dashboard build check and uploads `playwright-report/` when they fail.
+
+## Worktrees, tasks, usage, retention, smarter memory, more agents (2026-10-16)
+- Git worktree per worker: a worker in a git repo gets its own branch and folder. The agent panel shows the
+  branch and changed files, a Diff view, and Merge (into the repo's checked-out branch) / Discard. Setting and
+  a per-agent checkbox turn it off; `@@spawn ... worktree=no` too.
+- Task board (`/tasks`): five columns, drag cards between them. The coordinator plans with `@@task`; a worker's
+  tasks move to doing / review / blocked on their own. Each desk in the office shows its agent's current task.
+- Usage meter: adapters emit `usage` events from the CLI's token counts; "tokens today" in the top bar,
+  tokens and cost per agent on the Agents page and in the agent panel.
+- Event log retention: the database keeps detailed events for `retentionDays` (30); history files keep all.
+- Smarter memory: optional local embeddings through Ollama, fused with BM25. Settings has a Test button; the
+  Context page shows which search ran.
+- New adapters: Gemini CLI, Aider, Goose (written from their docs, not yet run against the real CLIs).

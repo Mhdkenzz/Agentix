@@ -14,6 +14,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState(server?.defaultCwd ?? '');
   const [prompt, setPrompt] = useState('');
+  const [worktree, setWorktree] = useState(server?.worktrees ?? true);
   const [avatar, setAvatar] = useState<number | 'random'>('random');
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState<string>();
@@ -31,7 +32,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   async function submit(replace = false) {
     setBusy(true); setError(''); setConflict(undefined);
     try {
-      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace });
+      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace, ...(role === 'worker' ? { worktree } : {}) });
       select(agent.id);
       onClose();
     } catch (e) {
@@ -64,6 +65,12 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
           <label>Name <input value={name} onChange={e => setName(e.target.value)} placeholder="random" /></label>
           <label>Working folder <input value={cwd} onChange={e => setCwd(e.target.value)} placeholder="~/.agentix/workspace" /></label>
         </div>
+        {role === 'worker' && (
+          <label className="check wt-check" title="Only when the folder is inside a git repository">
+            <input type="checkbox" checked={worktree} onChange={e => setWorktree(e.target.checked)} />
+            Own git branch (worktree) if the folder is a git repo, so it never clashes with other workers. You merge its work when it's ready.
+          </label>
+        )}
         <label>First prompt
           <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={3} placeholder="optional: what should it do first?" />
         </label>

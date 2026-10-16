@@ -22,12 +22,26 @@ export interface Settings {
   contextPaths: string[];
   /** the first-run setup has been finished (or skipped) */
   setupDone: boolean;
+  /** workers started inside a git repo get their own worktree and branch */
+  worktrees: boolean;
+  /** events older than this many days leave the database (0 = keep forever); history files keep everything */
+  retentionDays: number;
+  /** optional semantic search for the shared context, through a local Ollama */
+  embeddings: EmbeddingSettings;
+}
+
+export interface EmbeddingSettings {
+  provider: 'off' | 'ollama';
+  url: string;
+  model: string;
 }
 
 const MODES: CoordinatorMode[] = ['human', 'agent', 'both'];
 const DEFAULTS: Settings = {
   coordinatorMode: 'both', cliPaths: {}, defaultKind: 'codex', defaultCwd: '',
   sharedContext: true, contextPaths: [], setupDone: false,
+  worktrees: true, retentionDays: 30,
+  embeddings: { provider: 'off', url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' },
 };
 const file = () => join(AGENTIX_HOME, 'settings.json');
 
@@ -35,7 +49,10 @@ let cache: Settings | undefined;
 
 export function getSettings(): Settings {
   if (cache) return cache;
-  try { cache = { ...DEFAULTS, ...JSON.parse(readFileSync(file(), 'utf8')) }; } catch { cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [] }; }
+  try {
+    const saved = JSON.parse(readFileSync(file(), 'utf8'));
+    cache = { ...DEFAULTS, ...saved, embeddings: { ...DEFAULTS.embeddings, ...saved.embeddings } };
+  } catch { cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [], embeddings: { ...DEFAULTS.embeddings } }; }
   return cache!;
 }
 
@@ -55,6 +72,18 @@ export function updateSettings(patch: Partial<Settings>): Settings {
   if (typeof patch.defaultCwd === 'string') next.defaultCwd = patch.defaultCwd.trim();
   if (patch.sharedContext !== undefined) next.sharedContext = Boolean(patch.sharedContext);
   if (patch.setupDone !== undefined) next.setupDone = Boolean(patch.setupDone);
+  if (patch.worktrees !== undefined) next.worktrees = Boolean(patch.worktrees);
+  if (patch.retentionDays !== undefined) {
+    const n = Number(patch.retentionDays);
+    if (!Number.isInteger(n) || n < 0) throw new SettingsError('retentionDays must be a whole number of days (0 = keep forever)');
+    next.retentionDays = n;
+  }
+  if (patch.embeddings !== undefined) {
+    const e = { ...next.embeddings, ...patch.embeddings };
+    if (e.provider !== 'off' && e.provider !== 'ollama') throw new SettingsError('embeddings.provider must be "off" or "ollama"');
+    if (!/^https?:\/\//.test(e.url)) throw new SettingsError('embeddings.url must start with http:// or https://');
+    next.embeddings = { provider: e.provider, url: e.url.trim().replace(/\/+$/, ''), model: String(e.model).trim() || DEFAULTS.embeddings.model };
+  }
   if (patch.contextPaths !== undefined) {
     if (!Array.isArray(patch.contextPaths)) throw new SettingsError('contextPaths must be a list of folders');
     const paths = patch.contextPaths.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim());

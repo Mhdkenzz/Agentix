@@ -4,7 +4,7 @@ import { useStore } from '../store.ts';
 
 const ICON: Record<string, string> = {
   output: '💬', tool: '🛠', thinking: '💭', status: '•', steer: '🧭', message: '✉️', error: '⚠️',
-  'agent.created': '✨', 'agent.updated': '✎', 'agent.removed': '🗑', session: '↺',
+  'agent.created': '✨', 'agent.updated': '✎', 'agent.removed': '🗑', session: '↺', usage: '◔', task: '☑',
 };
 
 export function EventLine({ e, showAgent = false }: { e: AgentEvent; showAgent?: boolean }) {

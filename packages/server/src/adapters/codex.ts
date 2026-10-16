@@ -4,9 +4,10 @@
 //   resume: codex exec resume --json --skip-git-repo-check -c sandbox_mode="workspace-write" -- <id> <prompt>
 //           (resume has no -s/-C, so the sandbox goes through -c and the cwd is the process cwd)
 // JSONL events: thread.started{thread_id}, turn.started, item.started/item.completed{item},
-//   turn.completed{usage}, turn.failed{error}, error{message}
+//   turn.completed{usage:{input_tokens,cached_input_tokens,output_tokens}} → one usage event,
+//   turn.failed{error}, error{message}
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
-import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
+import { detectCli, runCli, parseJson, oneLine, emitUsage } from './proc.ts';
 
 const SANDBOX = process.env.AGENTIX_CODEX_SANDBOX || 'workspace-write';
 
@@ -60,6 +61,12 @@ export function handleCodexEvent(ctx: AdapterContext, ev: any): void {
           if (done) ctx.emit({ type: 'error', text: String(item.message ?? 'codex error'), data: item });
           return;
       }
+      return;
+    }
+    case 'turn.completed': {
+      // input_tokens includes the cached part, as in the OpenAI API
+      const u = ev.usage ?? {};
+      emitUsage(ctx, { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cached_input_tokens });
       return;
     }
     case 'turn.failed':

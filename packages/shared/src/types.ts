@@ -1,6 +1,6 @@
 // Agentix — shared data model
 
-export type AgentKind = 'mock' | 'codex' | 'opencode' | 'claude' | 'hermes' | 'pi';
+export type AgentKind = 'mock' | 'codex' | 'opencode' | 'claude' | 'hermes' | 'pi' | 'gemini' | 'aider' | 'goose';
 export type Role = 'ceo' | 'coordinator' | 'worker';
 export type Status = 'starting' | 'idle' | 'thinking' | 'working' | 'waiting_input' | 'error' | 'stopped';
 
@@ -17,6 +17,44 @@ export interface Agent {
   createdAt: number;
   /** set when the agent was removed; its record and history are kept */
   archivedAt?: number;
+  /** a worker working in its own git worktree and branch (cwd is inside `path`) */
+  worktree?: Worktree;
+}
+
+export interface Worktree {
+  /** top level of the repository the worker was started in */
+  repo: string;
+  /** the worktree folder, under $AGENTIX_HOME/worktrees */
+  path: string;
+  /** e.g. agentix/rook-a_12ab34 */
+  branch: string;
+  /** changes are counted from this commit (where the branch started, or its last merge) */
+  base: string;
+}
+
+/** Token use of one turn (or a running total), as reported by the CLI. */
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  /** in US dollars, when the CLI reports it */
+  cost?: number;
+}
+
+export type TaskStatus = 'todo' | 'doing' | 'review' | 'done' | 'blocked';
+
+export interface Task {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  /** agent id of the owner */
+  owner?: string;
+  /** who created it: 'user' or an agent id */
+  by: string;
+  note?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export type EventType =
@@ -28,6 +66,8 @@ export type EventType =
   | 'steer'
   | 'message'
   | 'session'   // new native session started; data.clear = true also hides earlier events in the UI
+  | 'usage'     // tokens (and cost) of one turn; data is a Usage
+  | 'task'      // a task-board task was created or changed; data is the Task
   | 'error';
 
 export interface AgentEvent {

@@ -11,6 +11,9 @@ import { EventBus } from './bus.ts';
 import { getSettings } from './settings.ts';
 import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command } from './commands.ts';
 import { addNote, sharedContextBlock } from './context.ts';
+import { createWorktree, worktreeStatus, mergeWorktree, discardWorktree, removeWorktree, GitError, type WorktreeStatus } from './worktree.ts';
+import { listTasks, createTask, updateTask, deleteTask, getTask, TaskError, TASK_STATUSES } from './tasks.ts';
+import type { Task, TaskStatus } from '../../shared/src/types.ts';
 
 const ROLES: Role[] = ['ceo', 'coordinator', 'worker'];
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
@@ -45,6 +48,8 @@ export interface CreateOptions {
   replace?: boolean;
   /** who asked: 'user' or the id of the agent (coordinator) that spawned it */
   from?: string;
+  /** false: work directly in cwd even when it is a git repo (workers only; default from settings) */
+  worktree?: boolean;
 }
 
 /** A random name nobody in the office has yet (falls back to Name-2, Name-3, ... when all are taken). */
@@ -138,10 +143,21 @@ export class SessionManager {
     let id = 'a_' + randomUUID().slice(0, 6);
     while (store.getAgent(id, true)) id = 'a_' + randomUUID().slice(0, 6); // removed agents keep their ids
     this.claimRole(role, id, opts.replace);
+    const name = opts.name || pickName();
+
+    // Workers in a git repo get their own worktree and branch, so they never overwrite each other.
+    let worktree: Agent['worktree'];
+    let worktreeError: string | undefined;
+    if (role === 'worker' && getSettings().worktrees && opts.worktree !== false) {
+      try {
+        const wt = createWorktree(cwd, id, name);
+        if (wt) { worktree = wt.worktree; cwd = wt.cwd; }
+      } catch (err: any) { worktreeError = err?.message ?? String(err); }
+    }
 
     const agent: Agent = {
       id,
-      name: opts.name || pickName(),
+      name,
       kind: kind as Agent['kind'],
       role,
       avatarId,
@@ -149,9 +165,12 @@ export class SessionManager {
       status: 'idle',
       activity: 'idle',
       createdAt: Date.now(),
+      ...(worktree ? { worktree } : {}),
     };
     store.createAgent(agent);
     this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
+    if (worktree) this.emit(id, { type: 'message', from: 'system', text: `Working on branch ${worktree.branch} in its own worktree (${worktree.path}), from ${worktree.repo}` });
+    if (worktreeError) this.emit(id, { type: 'error', from: 'system', text: `No worktree (${oneLine(worktreeError, 200)}); working directly in ${cwd}` });
 
     if (opts.prompt) {
       // Keep the first task in the history like any later instruction.
@@ -187,6 +206,12 @@ export class SessionManager {
   async removeAgent(id: string): Promise<void> {
     const agent = this.requireAgent(id);
     await this.interruptAgent(id);
+    if (agent.worktree) {
+      const kept = removeWorktree(agent.worktree, agent.name);
+      this.emit(id, { type: 'message', from: 'system', text: kept
+        ? `Worktree removed; unmerged work kept on branch ${agent.worktree.branch} in ${agent.worktree.repo}`
+        : `Worktree removed (no unmerged work)` });
+    }
     store.archiveAgent(id);
     this.inbox.delete(id);
     this.briefed.delete(id);
@@ -208,6 +233,92 @@ export class SessionManager {
     this.briefed.delete(id);
     this.setStatus(id, 'idle', clear ? 'idle (cleared)' : 'idle (new session)');
     return this.emit(id, { type: 'session', from: 'user', text: clear ? 'Session cleared' : 'New session started', data: { clear } });
+  }
+
+  // ---------- worktrees ----------
+
+  private requireWorktree(id: string): Agent & { worktree: NonNullable<Agent['worktree']> } {
+    const agent = this.requireAgent(id);
+    if (!agent.worktree) throw new HttpError(404, `${agent.name} has no worktree (it was not started in a git repo)`);
+    return agent as any;
+  }
+
+  private gitCall<T>(fn: () => T): T {
+    try { return fn(); } catch (err) { if (err instanceof GitError) throw new HttpError(409, err.message); throw err; }
+  }
+
+  getWorktree(id: string): WorktreeStatus {
+    const agent = this.requireWorktree(id);
+    return this.gitCall(() => worktreeStatus(agent.worktree));
+  }
+
+  /** Commit the worker's changes and merge its branch into the repo's checked-out branch. */
+  mergeWorktree(id: string): { merged: string; into: string } {
+    const agent = this.requireWorktree(id);
+    if (this.running.has(id)) throw new HttpError(409, `${agent.name} is working; wait until it is idle or interrupt it`);
+    const r = this.gitCall(() => mergeWorktree(agent.worktree, agent.name));
+    store.updateAgent({ ...agent, worktree: r.worktree });
+    this.emit(id, { type: 'message', from: 'user', text: `Merged ${agent.worktree.branch} into ${r.into} (${r.merged.slice(0, 8)})`, data: r });
+    this.queueUpdate(`kenz merged ${agent.name}'s branch ${agent.worktree.branch} into ${r.into}`);
+    return { merged: r.merged, into: r.into };
+  }
+
+  /** Throw away the worker's changes since the last merge. */
+  discardWorktree(id: string): void {
+    const agent = this.requireWorktree(id);
+    if (this.running.has(id)) throw new HttpError(409, `${agent.name} is working; wait until it is idle or interrupt it`);
+    this.gitCall(() => discardWorktree(agent.worktree));
+    this.emit(id, { type: 'message', from: 'user', text: `Discarded the changes on ${agent.worktree.branch}` });
+    this.queueUpdate(`kenz discarded ${agent.name}'s changes on ${agent.worktree.branch}`);
+  }
+
+  // ---------- task board ----------
+
+  private emitTask(task: Task, from: string, verb: string): void {
+    const who = task.owner ? store.getAgent(task.owner, true)?.name ?? task.owner : undefined;
+    this.emit(task.owner ?? (from !== 'user' && from !== 'system' ? from : 'team'), {
+      type: 'task', from, text: `${verb} ${task.id} [${task.status}]${who ? ` (${who})` : ''}: ${task.title}`, data: task,
+    });
+  }
+
+  private taskCall<T>(fn: () => T): T {
+    try { return fn(); } catch (err) { if (err instanceof TaskError) throw new HttpError(400, err.message); throw err; }
+  }
+
+  addTask(fields: { title: string; owner?: string; status?: TaskStatus; note?: string }, from = 'user'): Task {
+    const owner = fields.owner ? this.resolve(fields.owner)?.id : undefined;
+    if (fields.owner && !owner) throw new HttpError(400, `no agent called "${fields.owner}"`);
+    const task = this.taskCall(() => createTask({ ...fields, owner, by: from }));
+    this.emitTask(task, from, 'New task');
+    if (from === 'user') this.queueUpdate(`kenz added task ${task.id}: ${task.title}`);
+    return task;
+  }
+
+  editTask(id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }, from = 'user'): Task {
+    if (!getTask(id)) throw new HttpError(404, `no task ${id}`);
+    let owner = patch.owner;
+    if (owner) {
+      const a = this.resolve(owner);
+      if (!a) throw new HttpError(400, `no agent called "${owner}"`);
+      owner = a.id;
+    }
+    const task = this.taskCall(() => updateTask(id, { ...patch, owner }));
+    this.emitTask(task, from, 'Task');
+    if (from === 'user') this.queueUpdate(`kenz changed task ${task.id} to ${task.status}: ${task.title}`);
+    return task;
+  }
+
+  removeTask(id: string): void {
+    const task = getTask(id);
+    if (!task || !deleteTask(id)) throw new HttpError(404, `no task ${id}`);
+    this.emit(task.owner ?? 'team', { type: 'task', from: 'user', text: `Deleted ${task.id}: ${task.title}`, data: { ...task, deleted: true } });
+  }
+
+  /** Move a worker's tasks along without anyone asking: doing while it works, review or blocked after. */
+  private advanceTasks(agentId: string, from: TaskStatus[], to: TaskStatus): void {
+    for (const t of listTasks()) {
+      if (t.owner === agentId && from.includes(t.status)) this.emitTask(updateTask(t.id, { status: to }), 'system', 'Task');
+    }
   }
 
   // ---------- turns ----------
@@ -234,11 +345,7 @@ export class SessionManager {
       instructions = agent.role === 'coordinator' ? COORDINATOR_INSTRUCTIONS : CEO_INSTRUCTIONS;
     }
     if (agent.role !== 'worker') this.briefed.set(agentId, agent.role);
-    // Workers and the coordinator see the team brief, shared notes and related findings of other agents.
-    if (agent.role !== 'ceo') {
-      const shared = sharedContextBlock(agent, prompt);
-      if (shared) prompt = `${shared}\n\n${prompt}`;
-    }
+    if (agent.role === 'worker') this.advanceTasks(agentId, ['todo', 'review', 'blocked'], 'doing');
     // The CEO always sees what the whole team is doing.
     if (agent.role === 'ceo') {
       const label = from === 'user' ? '[FROM KENZ]' : '';
@@ -271,6 +378,12 @@ export class SessionManager {
     const done = (async () => {
       let failure: string | undefined;
       try {
+        // Workers and the coordinator see the team brief, shared notes and related findings of other agents.
+        if (agent.role !== 'ceo') {
+          const shared = await sharedContextBlock(agent, prompt);
+          if (shared) prompt = `${shared}\n\n${prompt}`;
+        }
+        if (signal.aborted) throw new Error('interrupted');
         await adapter.send(ctx, prompt);
       } catch (err: any) {
         failure = err?.message || String(err);
@@ -358,6 +471,7 @@ export class SessionManager {
       return;
     }
     if (agent.role !== 'worker' || aborted) return; // steers/stops already produced their own update
+    this.advanceTasks(agentId, ['doing'], failure ? 'blocked' : 'review');
     if (failure) {
       this.queueUpdate(`${agent.name} (${agent.id}) failed: ${oneLine(failure, 200)}`);
     } else {
@@ -424,7 +538,17 @@ export class SessionManager {
       const note = addNote(c.text, source.id);
       if (note) this.emit(sourceId, { type: 'message', from: 'system', text: `Saved to shared context: ${oneLine(c.text, 200)}`, data: { note } });
     }
-    if (source.role === 'worker') return;
+    if (source.role === 'worker') {
+      // A worker may move its own tasks (e.g. "@@task t3 status=done").
+      for (const c of parsed.commands) {
+        if (c.op !== 'task' || !c.id) continue;
+        const t = getTask(c.id);
+        if (!t || t.owner !== source.id) { this.emit(sourceId, { type: 'error', from: 'system', text: `${c.line}: not one of your tasks` }); continue; }
+        try { this.editTask(c.id, { status: c.opts.status as TaskStatus | undefined, ...(c.text ? { note: c.text } : {}) }, source.id); }
+        catch (err: any) { this.emit(sourceId, { type: 'error', from: 'system', text: `${c.line}: ${err?.message ?? err}` }); }
+      }
+      return;
+    }
     const commands = parsed.commands.filter(c => c.op !== 'remember');
     const errors = parsed.errors;
     const fail = (msg: string) => this.emit(sourceId, { type: 'error', from: 'system', text: msg });
@@ -459,12 +583,26 @@ export class SessionManager {
 
     switch (c.op) {
       case 'remember': return; // handled in runCommands
+      case 'task': {
+        const status = c.opts.status as TaskStatus | undefined;
+        if (status && !TASK_STATUSES.includes(status)) throw new Error(`status must be one of ${TASK_STATUSES.join(', ')}`);
+        if (c.id) this.editTask(c.id, { status, ...(c.opts.owner ? { owner: c.opts.owner } : {}), ...(c.text ? { note: c.text } : {}) }, source.id);
+        else this.addTask({ title: c.text, owner: c.opts.owner, status }, source.id);
+        return;
+      }
       case 'spawn': {
         const o = c.opts;
         const role = (o.role as Role | undefined) ?? 'worker';
         if (role !== 'worker') throw new Error('the coordinator can only spawn workers');
         const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
-        this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, prompt: c.text || undefined });
+        const worktree = o.worktree === undefined ? undefined : !/^(no|false|off|0)$/i.test(o.worktree);
+        // The task goes on the board before the worker starts, so its first turn moves it to doing.
+        const created = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree });
+        if (c.text) {
+          this.addTask({ title: oneLine(c.text, 140), owner: created.id, status: 'todo' }, source.id);
+          this.emit(created.id, { type: 'message', from: source.id, text: c.text });
+          this.startTurn(created.id, c.text, source.id);
+        }
         return;
       }
       case 'steer': {
@@ -502,11 +640,17 @@ export class SessionManager {
   /** One line per agent plus the start of its latest output. */
   teamDigest(excludeId?: string): string {
     const agents = store.getAgents().filter(a => a.id !== excludeId);
-    if (!agents.length) return '(no other agents)';
+    const open = listTasks().filter(t => t.status !== 'done');
+    const names = new Map(store.getAllAgents().map(a => [a.id, a.name]));
+    const tasks = open.length
+      ? `\nTasks (not done):\n${open.map(t => `- ${t.id} [${t.status}] ${t.title}${t.owner ? ` (${names.get(t.owner) ?? t.owner})` : ''}`).join('\n')}`
+      : '';
+    if (!agents.length) return `(no other agents)${tasks}`;
     return agents.map(a => {
       const last = store.getAgentEvents(a.id, 0, 50).filter(e => e.type === 'output').pop();
       const out = last?.text ? `\n    last output: ${oneLine(last.text, 200)}` : '';
-      return `- ${a.name} (${a.id}, ${a.kind}, ${a.role}): ${a.status} — ${a.activity}${out}`;
-    }).join('\n');
+      const branch = a.worktree ? ` [branch ${a.worktree.branch}]` : '';
+      return `- ${a.name} (${a.id}, ${a.kind}, ${a.role})${branch}: ${a.status} — ${a.activity}${out}`;
+    }).join('\n') + tasks;
   }
 }

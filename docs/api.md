@@ -64,12 +64,15 @@ Create a new agent.
   "avatarId": "random",
   "cwd": "/path/to/project",
   "prompt": "fix the failing test",
-  "replace": false
+  "replace": false,
+  "worktree": true
 }
 ```
 
 Only `kind` is required. `role` defaults to `worker`, `avatarId` to `"random"` (or 0–9), `cwd` to
 `~/.agentix/workspace` (must be absolute; created if missing). With `prompt`, the first turn starts at once.
+A worker whose `cwd` is inside a git repository gets its own worktree and branch (see Worktrees) unless
+`"worktree": false` or the `worktrees` setting is off.
 
 **Response:** `201` with the created agent. `400` for an unknown kind/role/avatar, `409` if a
 coordinator or CEO already exists (body has `data.existing`); send `"replace": true` to demote it to worker.
@@ -116,12 +119,55 @@ Get event history for an agent (removed ones too). `after` filters to events wit
 - `GET /api/context`: `{ brief, notes, contextPaths, sharedContext, dir }`
 - `PUT /api/context/brief` `{ text }`: the team brief (`$AGENTIX_HOME/context/brief.md`)
 - `POST /api/context/notes` `{ text }` / `DELETE /api/context/notes/:id`: notes (`context/notes.jsonl`)
-- `GET /api/context/search?q=...&limit=10`: BM25 keyword search over notes, agent outputs and the text
-  files under `contextPaths`. Hits: `{ source: note|output|file, title, text, score, ... }`
+- `GET /api/context/search?q=...&limit=10`: search over notes, agent outputs and the text files under
+  `contextPaths`. Returns `{ hits: [{ source: note|output|file, title, text, score, ... }], embeddingError? }`.
+  Always BM25 keywords; with `embeddings.provider: "ollama"` it also ranks by meaning (Ollama `/api/embed`,
+  cached in `context/embeddings.jsonl`) and fuses both lists (reciprocal rank fusion). If Ollama fails it
+  falls back to keywords and says why in `embeddingError`.
+- `POST /api/context/embeddings/test`: embeds a test sentence with the saved settings: `{ ok, dimensions | error }`.
 
 Before every worker and coordinator turn (when `sharedContext` is on), the prompt starts with a
 `[SHARED CONTEXT]` block: the brief, the 5 best hits for the task (never the agent's own output) and how to
 add a note. Any agent can save a note with a line `@@remember :: <fact>`.
+
+### Worktrees
+
+Each such worker works in `$AGENTIX_HOME/worktrees/<agentId>` on branch `agentix/<name>-<id>`, started from
+the repo's current commit, so workers in one repo never overwrite each other.
+
+- `GET /api/agents/:id/worktree`: `{ branch, repo, path, target, files: [{ status, path }], commits, stat, diff, truncated }`,
+  everything changed since the branch's base (new files included; diff capped at 200 KB). `404` without a worktree.
+- `POST /api/agents/:id/worktree/merge`: commits the work on the branch and merges it (`--no-ff`) into the
+  branch the repo has checked out. `{ merged, into }`. A failed merge is aborted and nothing changes (`409`).
+  `409` while the agent is running. The coordinator is told.
+- `POST /api/agents/:id/worktree/discard`: resets the worktree to its base and deletes new files.
+- Removing the agent commits leftover work to its branch (kept if it has new commits) and deletes the folder.
+
+### Tasks
+
+The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title, status, owner?, by, note?, createdAt, updatedAt }`,
+`status` one of `todo`, `doing`, `review`, `done`, `blocked`.
+
+- `GET /api/tasks`: `{ tasks }`
+- `POST /api/tasks` `{ title, owner?, status?, note? }`: `201 { task }`
+- `PATCH /api/tasks/:id` `{ title?, status?, owner? (null clears), note? }`: `{ task }`
+- `DELETE /api/tasks/:id`
+
+The server moves a worker's own tasks: `todo`/`review`/`blocked` to `doing` when a turn starts, `doing` to
+`review` when it ends (`blocked` if it failed). `@@spawn ... :: <task>` adds the task for the new worker.
+The coordinator's `[TEAM STATUS]`/updates list open tasks.
+
+### GET `/api/usage`
+
+`{ total: [...], today: [...] }`, one row per agent: `{ agentId, turns, input, output, cacheRead, cacheWrite, cost }`.
+`today` counts from local midnight. Summed from `usage` events, which adapters emit when the CLI reports
+token counts (and cost, when it reports it).
+
+### Event retention
+
+Every 6 hours (and at start) the server deletes events older than `retentionDays` (default 30, `0` keeps
+everything) from the database, except `agent.*`, `session`, `usage` and `task` events. The history files on
+disk are never trimmed.
 
 ### GET `/api/setup/scan`
 
@@ -138,7 +184,8 @@ Response: `{ events, stats }`, where `stats` is `[{ agentId, count, lastTs }]` f
 ### GET / PUT `/api/settings`
 
 `{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "",
-"sharedContext": true, "contextPaths": ["/abs/docs"], "setupDone": false }`.
+"sharedContext": true, "contextPaths": ["/abs/docs"], "setupDone": false, "worktrees": true, "retentionDays": 30,
+"embeddings": { "provider": "off", "url": "http://127.0.0.1:11434", "model": "nomic-embed-text" } }`.
 PUT takes any subset. `coordinatorMode`: `human` (no coordinator updates, its @@ commands are ignored),
 `agent` (the dashboard routes kenz's worker instructions through the coordinator), `both` (default).
 Stored in `$AGENTIX_HOME/settings.json`.
@@ -158,9 +205,12 @@ Lines in a coordinator's output (the server runs them; see `server/src/commands.
 @@stop <agent id or name>
 @@tell ceo :: <report>
 @@remember :: <fact for the shared context>
+@@task owner=Rook :: <title>                 # add a task to the board
+@@task t3 status=done note="merged" :: <new title (optional)>   # change one
 ```
 
-The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`. Every CEO turn starts with a `[TEAM STATUS]` digest.
+The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`
+and `@@task <id> status=... note=...` for their own tasks. `@@spawn ... worktree=no` skips the worktree. Every CEO turn starts with a `[TEAM STATUS]` digest.
 
 ### GET `/api/stream`
 
@@ -189,6 +239,8 @@ it), otherwise the last `?tail=N` events (default 100).
 | `steer` | Human/agent sent instructions |
 | `message` | Message to an agent, e.g. `[AGENTIX UPDATE]` from `system` to the coordinator |
 | `session` | New native session; `data.clear` true means dashboards hide earlier events |
+| `usage` | Tokens for one turn: `data` is `{ input, output, cacheRead?, cacheWrite?, cost? }` |
+| `task` | A task was created or changed; `data` is the task (`deleted: true` when removed) |
 | `error` | Error occurred |
 
 ## History on disk

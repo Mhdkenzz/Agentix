@@ -1,6 +1,6 @@
 // Test setup: import this FIRST in every test file, before anything from src/.
 // It points the store at a throwaway directory (never the real ~/.agentix),
-// speeds up timers, and puts fake codex/opencode/claude CLIs first on PATH.
+// speeds up timers, and puts fake agent CLIs (codex, opencode, claude, pi, hermes, gemini, aider, goose) first on PATH.
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,20 +54,22 @@ fake('codex', [
   '{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc ls","status":"in_progress"}}',
   '{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"/w/hello.txt","kind":"add"}],"status":"completed"}}',
   '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Done."}}',
-  '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+  '{"type":"turn.completed","usage":{"input_tokens":12840,"cached_input_tokens":11008,"output_tokens":356}}',
 ]);
 fake('opencode', [
   '{"type":"step_start","sessionID":"ses_fake1","part":{"type":"step-start"}}',
   '{"type":"tool_use","sessionID":"ses_fake1","part":{"type":"tool","tool":"shell","state":{"status":"completed","input":{"command":"echo hi > x.txt"},"output":"(no output)"}}}',
+  '{"type":"step_finish","sessionID":"ses_fake1","part":{"type":"step-finish","reason":"tool-calls","cost":0.0132,"tokens":{"input":10234,"output":87,"reasoning":12,"cache":{"read":0,"write":0}}}}',
+  '{"type":"step_start","sessionID":"ses_fake1","part":{"type":"step-start"}}',
   '{"type":"text","sessionID":"ses_fake1","part":{"type":"text","text":"ok"}}',
-  '{"type":"step_finish","sessionID":"ses_fake1","part":{"type":"step-finish","reason":"stop"}}',
+  '{"type":"step_finish","sessionID":"ses_fake1","part":{"type":"step-finish","reason":"stop","cost":0.0021,"tokens":{"input":312,"output":40,"reasoning":0,"cache":{"read":10240,"write":0}}}}',
 ]);
 fake('claude', [
   '{"type":"system","subtype":"init","session_id":"cl-fake-1"}',
   '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Check the folder first."}]},"session_id":"cl-fake-1"}',
   '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]},"session_id":"cl-fake-1"}',
   '{"type":"assistant","message":{"content":[{"type":"text","text":"All done"}]},"session_id":"cl-fake-1"}',
-  '{"type":"result","subtype":"success","is_error":false,"result":"All done","session_id":"cl-fake-1"}',
+  '{"type":"result","subtype":"success","is_error":false,"result":"All done","session_id":"cl-fake-1","num_turns":2,"total_cost_usd":0.0421,"usage":{"input_tokens":9,"cache_creation_input_tokens":1520,"cache_read_input_tokens":13360,"output_tokens":212}}',
 ]);
 
 // FAKE_CLAUDE_LOGGED_OUT=1: what Claude Code prints with no credentials (a synthetic reply, an error result, exit 1).
@@ -88,9 +90,10 @@ fake('pi', [
   '{"type":"agent_start"}',
   '{"type":"turn_start"}',
   '{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"say hi"}]}}',
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"t1","name":"bash","arguments":{"command":"ls -la"}}],"stopReason":"toolUse","usage":{"input":2130,"output":48,"cacheRead":0,"cacheWrite":0,"totalTokens":2178,"cost":{"input":0.0064,"output":0.0007,"cacheRead":0,"cacheWrite":0,"total":0.0071}}}}',
   '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls -la"}}',
   '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{},"isError":false}',
-  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi from pi"}],"stopReason":"stop"}}',
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi from pi"}],"stopReason":"stop","usage":{"input":95,"output":12,"cacheRead":2112,"cacheWrite":0,"totalTokens":2219,"cost":{"input":0.0003,"output":0.0002,"cacheRead":0.0006,"cacheWrite":0,"total":0.0011}}}}',
   '{"type":"agent_end","messages":[]}',
 ]);
 {
@@ -109,6 +112,63 @@ echo "Second line."
 printf '\\nsession_id: 20261016_101543_8b1686\\n' >&2
 `);
 chmodSync(join(BIN, 'hermes'), 0o755);
+
+// Gemini CLI `-p --output-format stream-json`, written from its StreamJsonFormatter calls (0.64.0), not a real run.
+// FAKE_GEMINI_ERROR=1 gives an error result and exit 41, as when no auth method is set.
+fake('gemini', [
+  '{"type":"init","timestamp":"2026-10-16T10:20:01.112Z","session_id":"8f3b2c1e-5d4a-4f6b-9c7e-1a2b3c4d5e6f","model":"gemini-2.5-pro"}',
+  '{"type":"message","timestamp":"2026-10-16T10:20:01.115Z","role":"user","content":"say hi"}',
+  '{"type":"message","timestamp":"2026-10-16T10:20:03.201Z","role":"assistant","content":"I\'ll look","delta":true}',
+  '{"type":"message","timestamp":"2026-10-16T10:20:03.260Z","role":"assistant","content":" at the files first.","delta":true}',
+  '{"type":"tool_use","timestamp":"2026-10-16T10:20:03.410Z","tool_name":"run_shell_command","tool_id":"run_shell_command-1760610003410-1","parameters":{"command":"ls -la","description":"List files"}}',
+  '{"type":"tool_result","timestamp":"2026-10-16T10:20:03.502Z","tool_id":"run_shell_command-1760610003410-1","status":"success","output":"hello.txt"}',
+  '{"type":"message","timestamp":"2026-10-16T10:20:05.010Z","role":"assistant","content":"Hello","delta":true}',
+  '{"type":"message","timestamp":"2026-10-16T10:20:05.044Z","role":"assistant","content":" from Gemini.","delta":true}',
+  '{"type":"result","timestamp":"2026-10-16T10:20:05.120Z","status":"success","stats":{"total_tokens":8650,"input_tokens":8432,"output_tokens":218,"cached":4096,"input":4336,"duration_ms":4008,"tool_calls":1}}',
+]);
+{
+  const p = join(BIN, 'gemini');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('[ -n "$FAKE_IGNORE_INT" ]', `if [ -n "$FAKE_GEMINI_ERROR" ]; then
+  printf '%s\\n' '{"type":"init","session_id":"9a8b7c6d-0000-4000-8000-000000000001","model":"gemini-2.5-pro"}'
+  printf '%s\\n' '{"type":"result","status":"error","error":{"type":"FatalAuthenticationError","message":"Please set an Auth method in your settings.json"},"stats":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"cached":0,"input":0,"duration_ms":0,"tool_calls":0}}'
+  echo "Please set an Auth method" >&2
+  exit 41
+fi
+[ -n "$FAKE_IGNORE_INT" ]`));
+}
+
+// Aider with --no-pretty --no-stream: banner, the reply, the token report, then what it applied (strings from 0.86.2).
+fake('aider', [
+  'Aider v0.86.2',
+  'Main model: anthropic/claude-sonnet-4-20250514 with diff edit format, infinite output',
+  'Weak model: anthropic/claude-3-5-haiku-20241022',
+  'Git repo: .git with 3 files',
+  'Repo-map: using 4096 tokens, auto refresh',
+  'Restored previous conversation history.',
+  '',
+  'I\'ll create hello.py with a greeting.',
+  '',
+  'Done: hello.py prints hello.',
+  '',
+  'Tokens: 2.3k sent, 1.1k cache write, 4.5k cache hit, 120 received.',
+  'Cost: $0.0123 message, $0.0456 session.',
+  'Applied edit to hello.py',
+  'Commit 1a2b3c4 feat: Add hello.py with a greeting',
+]);
+
+// Goose `run` (from its docs, not a real run): a session banner, the reply, and a tool call as a header plus parameters.
+fake('goose', [
+  'starting session | provider: anthropic model: claude-sonnet-4-5',
+  '    session id: 20261016_1',
+  '    working directory: /w',
+  '',
+  'I\'ll check the folder.',
+  '─── shell | developer ──────────────────────────',
+  'command: ls -la',
+  '',
+  '',
+  'The folder has hello.txt.',
+]);
 
 /** argv of each call to a fake CLI */
 export function fakeCalls(name: string): string[][] {

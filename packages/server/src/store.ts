@@ -2,7 +2,7 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import type { Agent, AgentEvent, Status } from '../../shared/src/types.ts';
+import type { Agent, AgentEvent, Status, Usage } from '../../shared/src/types.ts';
 import { withHistory } from './history.ts';
 
 /** Data directory: $AGENTIX_HOME, else ~/.agentix. Tests point this at a temp dir. */
@@ -40,7 +40,13 @@ export interface IStore {
   searchEvents(f: EventSearch): AgentEvent[];
   /** per agent: number of events and time of the latest one */
   eventStats(): { agentId: string; count: number; lastTs: number }[];
+  /** per agent: summed 'usage' events since `since` (ms), and how many turns reported usage */
+  usageTotals(since?: number): UsageTotal[];
+  /** delete events older than `before` (ms), except the types in `keep`; returns how many */
+  pruneEvents(before: number, keep: string[]): number;
 }
+
+export interface UsageTotal extends Usage { agentId: string; turns: number }
 
 export interface EventSearch {
   q?: string;          // case-insensitive substring of the text
@@ -78,7 +84,8 @@ function openSqlite(): IStore | null {
       activity TEXT NOT NULL,
       nativeSessionId TEXT,
       createdAt INTEGER NOT NULL,
-      archivedAt INTEGER
+      archivedAt INTEGER,
+      worktree TEXT
     );
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,9 +100,10 @@ function openSqlite(): IStore | null {
   `);
 
   // Databases from before agents were archived instead of deleted.
-  if (!db.prepare('PRAGMA table_info(agents)').all().some((c: any) => c.name === 'archivedAt')) {
-    db.exec('ALTER TABLE agents ADD COLUMN archivedAt INTEGER');
-  }
+  const columns = new Set(db.prepare('PRAGMA table_info(agents)').all().map((c: any) => c.name));
+  if (!columns.has('archivedAt')) db.exec('ALTER TABLE agents ADD COLUMN archivedAt INTEGER');
+  if (!columns.has('worktree')) db.exec('ALTER TABLE agents ADD COLUMN worktree TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS events_type_ts ON events(type, ts)');
 
   const toAgent = (r: any): Agent => ({
     id: r.id, name: r.name, kind: r.kind, role: r.role, avatarId: r.avatarId,
@@ -103,6 +111,7 @@ function openSqlite(): IStore | null {
     ...(r.nativeSessionId ? { nativeSessionId: r.nativeSessionId } : {}),
     createdAt: r.createdAt,
     ...(r.archivedAt != null ? { archivedAt: r.archivedAt } : {}),
+    ...(r.worktree ? { worktree: JSON.parse(r.worktree) } : {}),
   });
   const toEvent = (r: any): AgentEvent => ({
     id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
@@ -116,9 +125,9 @@ function openSqlite(): IStore | null {
     allAgents: db.prepare('SELECT * FROM agents ORDER BY createdAt ASC'),
     agent: db.prepare('SELECT * FROM agents WHERE id = ?'),
     archive: db.prepare(`UPDATE agents SET archivedAt=?, status='stopped', activity='removed' WHERE id=?`),
-    insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=? WHERE id=?`),
+    insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt, worktree)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=?, worktree=? WHERE id=?`),
     setStatus: db.prepare('UPDATE agents SET status=?, activity=? WHERE id=?'),
     setSession: db.prepare('UPDATE agents SET nativeSessionId=? WHERE id=?'),
     deleteAgent: db.prepare('DELETE FROM agents WHERE id = ?'),
@@ -130,6 +139,11 @@ function openSqlite(): IStore | null {
     resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE archivedAt IS NULL AND status IN (${BUSY.map(() => '?').join(',')})`),
     countAgents: db.prepare('SELECT COUNT(*) AS n FROM agents'),
     stats: db.prepare('SELECT agentId, COUNT(*) AS n, MAX(ts) AS lastTs FROM events GROUP BY agentId'),
+    usage: db.prepare(`SELECT agentId, COUNT(*) AS turns,
+      SUM(json_extract(data, '$.input')) AS input, SUM(json_extract(data, '$.output')) AS output,
+      SUM(json_extract(data, '$.cacheRead')) AS cacheRead, SUM(json_extract(data, '$.cacheWrite')) AS cacheWrite,
+      SUM(json_extract(data, '$.cost')) AS cost
+      FROM events WHERE type = 'usage' AND ts >= ? GROUP BY agentId`),
   };
 
   const s: IStore = {
@@ -141,10 +155,12 @@ function openSqlite(): IStore | null {
       return r && (includeArchived || r.archivedAt == null) ? toAgent(r) : undefined;
     },
     createAgent: a => {
-      q.insertAgent.run(a.id, a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.createdAt);
+      q.insertAgent.run(a.id, a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.createdAt,
+        a.worktree ? JSON.stringify(a.worktree) : null);
     },
     updateAgent: a => {
-      q.updateAgent.run(a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.id);
+      q.updateAgent.run(a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null,
+        a.worktree ? JSON.stringify(a.worktree) : null, a.id);
     },
     setStatus: (id, status, activity) => { q.setStatus.run(status, activity, id); },
     setNativeSessionId: (id, sid) => { q.setSession.run(sid, id); },
@@ -169,6 +185,13 @@ function openSqlite(): IStore | null {
       return db.prepare(sql).all(...args, f.limit ?? 200).map(toEvent);
     },
     eventStats: () => q.stats.all().map((r: any) => ({ agentId: r.agentId, count: Number(r.n), lastTs: Number(r.lastTs) })),
+    usageTotals: (since = 0) => q.usage.all(since).map((r: any) => ({
+      agentId: r.agentId, turns: Number(r.turns), input: Number(r.input ?? 0), output: Number(r.output ?? 0),
+      cacheRead: Number(r.cacheRead ?? 0), cacheWrite: Number(r.cacheWrite ?? 0), cost: Number(r.cost ?? 0),
+    })),
+    pruneEvents: (before, keep) => Number(db.prepare(
+      `DELETE FROM events WHERE ts < ? ${keep.length ? `AND type NOT IN (${keep.map(() => '?').join(',')})` : ''}`,
+    ).run(before, ...keep).changes),
   };
 
   // One-time import of the JSON store written by earlier versions.
@@ -261,6 +284,24 @@ function openJson(): IStore {
         m.set(e.agentId, s);
       }
       return [...m.values()];
+    },
+    usageTotals: (since = 0) => {
+      const m = new Map<string, UsageTotal>();
+      for (const e of events) {
+        if (e.type !== 'usage' || e.ts < since) continue;
+        const d = (e.data ?? {}) as Partial<Usage>;
+        const t = m.get(e.agentId) ?? { agentId: e.agentId, turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+        t.turns++; t.input += d.input ?? 0; t.output += d.output ?? 0;
+        t.cacheRead! += d.cacheRead ?? 0; t.cacheWrite! += d.cacheWrite ?? 0; t.cost! += d.cost ?? 0;
+        m.set(e.agentId, t);
+      }
+      return [...m.values()];
+    },
+    pruneEvents: (before, keep) => {
+      const n = events.length;
+      events = events.filter(e => e.ts >= before || keep.includes(e.type));
+      if (events.length !== n) save();
+      return n - events.length;
     },
     appendEvent: (e, agentId) => {
       const full: AgentEvent = { ...e, id: nextEventId++, ts: Date.now(), agentId };

@@ -1,6 +1,6 @@
 // Page links, live counts by status, connection dot, "+ New agent".
 import { NavLink } from 'react-router-dom';
-import { useStore } from '../store.ts';
+import { useStore, fmtTokens, fmtCost } from '../store.ts';
 import { api, type CoordinatorMode } from '../api.ts';
 
 const MODE_LABEL: Record<CoordinatorMode, string> = { human: 'You coordinate', agent: 'Agent coordinates', both: 'You + agent' };
@@ -22,7 +22,7 @@ export function CoordinatorModeSelect() {
   );
 }
 
-const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/context', 'Context'], ['/history', 'History'], ['/settings', 'Settings']] as const;
+const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/tasks', 'Tasks'], ['/context', 'Context'], ['/history', 'History'], ['/settings', 'Settings']] as const;
 
 export function TopBar() {
   const agents = useStore(s => s.agents);
@@ -33,6 +33,9 @@ export function TopBar() {
   const busy = count(s => s === 'thinking' || s === 'working' || s === 'starting');
   const waiting = count(s => s === 'waiting_input');
   const errors = count(s => s === 'error');
+  const usageToday = useStore(s => s.usageToday);
+  const tokensToday = Object.values(usageToday).reduce((n, u) => n + u.input + u.output, 0);
+  const costToday = Object.values(usageToday).reduce((n, u) => n + (u.cost ?? 0), 0);
   return (
     <nav className="topbar">
       <div className="brand"><span className="logo">A</span>Agentix</div>
@@ -43,6 +46,7 @@ export function TopBar() {
       <CoordinatorModeSelect />
       <div className="counts">
         <span title="agents">{list.length} agents</span>
+        {tokensToday > 0 && <span className="c-tokens" title={`Tokens used today by all agents${costToday ? `, ${fmtCost(costToday)}` : ''}`}>{fmtTokens(tokensToday)} tokens today</span>}
         <span className="c-busy" title="busy">● {busy} busy</span>
         {waiting > 0 && <span className="c-wait">● {waiting} waiting</span>}
         {errors > 0 && <span className="c-err">● {errors} error</span>}

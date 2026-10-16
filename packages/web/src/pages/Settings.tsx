@@ -22,12 +22,14 @@ export function Settings() {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [saved, setSaved] = useState('');
   const [error, setError] = useState('');
+  const [emb, setEmb] = useState<ServerSettings['embeddings']>();
+  const [embTest, setEmbTest] = useState<string>();
 
   const detect = () => api.adapters().then(setAdapters).catch(e => setError(String(e.message ?? e)));
   useEffect(() => { detect(); }, []);
   // Take the saved paths once; later saves of other settings must not wipe what's being typed.
   const pathsLoaded = useRef(false);
-  useEffect(() => { if (server && !pathsLoaded.current) { pathsLoaded.current = true; setPaths(server.cliPaths); } }, [server]);
+  useEffect(() => { if (server && !pathsLoaded.current) { pathsLoaded.current = true; setPaths(server.cliPaths); setEmb(server.embeddings); } }, [server]);
   useEffect(() => {
     if (!canSpeak) return;
     const load = () => setVoices(speechSynthesis.getVoices());
@@ -74,6 +76,51 @@ export function Settings() {
               onBlur={e => e.target.value.trim() !== server.defaultCwd && save({ defaultCwd: e.target.value }, 'default folder')} />
           </label>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>Workers and history</h2>
+        <label className="check">
+          <input type="checkbox" checked={server.worktrees} onChange={e => save({ worktrees: e.target.checked }, 'worktree setting')} />
+          Give each new worker its own git branch (worktree) when its folder is a git repo
+        </label>
+        <p className="muted small">Workers then never overwrite each other. Review a worker's changes in its panel and Merge or Discard them.</p>
+        <div className="grid2">
+          <label>Keep the detailed event log for (days)
+            <input type="number" min={0} max={3650} defaultValue={server.retentionDays} key={server.retentionDays}
+              onBlur={e => { const v = Math.max(0, Math.round(Number(e.target.value) || 0)); if (v !== server.retentionDays) save({ retentionDays: v }, 'log retention'); }} />
+          </label>
+        </div>
+        <p className="muted small">Older output, tool and thinking events are removed from the database to keep it fast; 0 keeps everything. Agents, tasks and usage totals are always kept, and the full history files in <span className="mono">~/.agentix/history</span> are never trimmed.</p>
+      </section>
+
+      <section className="card">
+        <h2>Memory search</h2>
+        <p className="muted small">Shared context is always searched by keywords. With a local embedding model it also finds notes and files that mean the same thing in other words. Nothing leaves your machine.</p>
+        {emb && (
+          <>
+            <div className="grid2">
+              <label>Meaning search
+                <select value={emb.provider} onChange={e => setEmb({ ...emb, provider: e.target.value as 'off' | 'ollama' })}>
+                  <option value="off">Off (keywords only)</option><option value="ollama">Ollama (local)</option>
+                </select>
+              </label>
+              <label>Model <input className="mono" value={emb.model} onChange={e => setEmb({ ...emb, model: e.target.value })} placeholder="nomic-embed-text" /></label>
+              <label className="span2">Ollama address <input className="mono" value={emb.url} onChange={e => setEmb({ ...emb, url: e.target.value })} placeholder="http://127.0.0.1:11434" /></label>
+            </div>
+            <p className="muted small">Install Ollama, then run <span className="mono">ollama pull {emb.model || 'nomic-embed-text'}</span>.</p>
+            <div className="row end">
+              {embTest && <span className={`small grow ${embTest.startsWith('✓') ? 'st-working' : 'st-error'}`}>{embTest}</span>}
+              <button className="btn" disabled={emb.provider === 'off'} onClick={async () => {
+                setEmbTest('Testing…');
+                await save({ embeddings: emb }, 'memory search');
+                const r = await api.testEmbeddings().catch(e => ({ ok: false, error: String(e.message ?? e) }) as { ok: boolean; error?: string; dimensions?: number });
+                setEmbTest(r.ok ? `✓ works (${r.dimensions} dimensions)` : `✕ ${r.error}`);
+              }}>Test</button>
+              <button className="btn primary" onClick={() => save({ embeddings: emb }, 'memory search')}>Save</button>
+            </div>
+          </>
+        )}
       </section>
 
       <section className="card">
