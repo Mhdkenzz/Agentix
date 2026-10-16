@@ -1,5 +1,5 @@
 // REST + SSE client for the Agentix server. In dev, Vite proxies /api to the server.
-import type { Agent, AgentEvent, Role } from '../../shared/src/types.ts';
+import type { Agent, AgentEvent, Role, Task, TaskStatus, Usage } from '../../shared/src/types.ts';
 
 export interface AdapterInfo { kind: string; installed: boolean; version?: string }
 
@@ -28,6 +28,7 @@ export interface NewAgent {
   cwd?: string;
   prompt?: string;
   replace?: boolean;
+  worktree?: boolean;
 }
 
 export type CoordinatorMode = 'human' | 'agent' | 'both';
@@ -39,10 +40,20 @@ export interface ServerSettings {
   sharedContext: boolean;
   contextPaths: string[];
   setupDone: boolean;
+  worktrees: boolean;
+  retentionDays: number;
+  embeddings: { provider: 'off' | 'ollama'; url: string; model: string };
+}
+
+export interface UsageTotal extends Usage { agentId: string; turns: number }
+export interface WorktreeStatus {
+  branch: string; repo: string; path: string; target: string;
+  files: { status: string; path: string }[]; commits: number; stat: string; diff: string; truncated: boolean;
 }
 
 export interface Note { id: string; ts: number; from: string; text: string }
 export interface ContextHit { source: 'note' | 'output' | 'file'; title: string; text: string; score: number; ts?: number; agentId?: string; path?: string }
+export interface SearchResult { hits: ContextHit[]; embeddingError?: string }
 export interface ContextInfo { brief: string; notes: Note[]; contextPaths: string[]; sharedContext: boolean; dir: string }
 export interface FoundCli { kind: string; name: string; path: string; version: string; runs: boolean; on_path: boolean; all_paths: string[]; supported: boolean }
 export interface ScanResult { scanner: 'python' | 'node'; platform: string; found: FoundCli[] }
@@ -66,15 +77,25 @@ export const api = {
   saveBrief: (text: string) => call<{ brief: string }>('/api/context/brief', 'PUT', { text }).then(r => r.brief),
   addNote: (text: string) => call<{ note: Note | null }>('/api/context/notes', 'POST', { text }).then(r => r.note),
   deleteNote: (id: string) => call(`/api/context/notes/${encodeURIComponent(id)}`, 'DELETE'),
-  searchContext: (q: string) => call<{ hits: ContextHit[] }>(`/api/context/search?q=${encodeURIComponent(q)}&limit=20`).then(r => r.hits),
+  searchContext: (q: string) => call<SearchResult>(`/api/context/search?q=${encodeURIComponent(q)}&limit=20`),
   scan: () => call<ScanResult>('/api/setup/scan'),
+  usage: () => call<{ total: UsageTotal[]; today: UsageTotal[] }>('/api/usage'),
+  tasks: () => call<{ tasks: Task[] }>('/api/tasks').then(r => r.tasks),
+  addTask: (t: { title: string; owner?: string; status?: TaskStatus }) => call<{ task: Task }>('/api/tasks', 'POST', t).then(r => r.task),
+  editTask: (id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }) =>
+    call<{ task: Task }>(`/api/tasks/${id}`, 'PATCH', patch).then(r => r.task),
+  deleteTask: (id: string) => call(`/api/tasks/${id}`, 'DELETE'),
+  worktree: (id: string) => call<WorktreeStatus>(`/api/agents/${id}/worktree`),
+  merge: (id: string) => call<{ merged: string; into: string }>(`/api/agents/${id}/worktree/merge`, 'POST'),
+  discard: (id: string) => call(`/api/agents/${id}/worktree/discard`, 'POST'),
+  testEmbeddings: () => call<{ ok: boolean; dimensions?: number; error?: string }>('/api/context/embeddings/test', 'POST'),
   steer: (id: string, text: string) => call(`/api/agents/${id}/steer`, 'POST', { text, from: 'user' }),
   interrupt: (id: string) => call(`/api/agents/${id}/interrupt`, 'POST'),
   events: (id: string, after = 0) =>
     call<{ events: AgentEvent[] }>(`/api/agents/${id}/events?after=${after}`).then(r => r.events),
 };
 
-const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'thinking', 'status', 'steer', 'message', 'session', 'error'];
+const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'thinking', 'status', 'steer', 'message', 'session', 'usage', 'task', 'error'];
 
 /**
  * One EventSource for everything. The browser reconnects on its own and sends

@@ -9,6 +9,7 @@ export function Context() {
   const live = useStore(s => s.agents);
   const archived = useStore(s => s.archived);
   const setServerSettings = useStore(s => s.setServerSettings);
+  const server = useStore(s => s.server);
   const lastEventId = useStore(s => s.lastEventId);
   const [info, setInfo] = useState<ContextInfo>();
   const [brief, setBrief] = useState('');
@@ -16,6 +17,7 @@ export function Context() {
   const [folder, setFolder] = useState('');
   const [q, setQ] = useState('');
   const [hits, setHits] = useState<ContextHit[]>();
+  const [semantic, setSemantic] = useState<string>();
   const [saved, setSaved] = useState('');
   const [error, setError] = useState('');
 
@@ -26,7 +28,7 @@ export function Context() {
 
   useEffect(() => {
     if (!q.trim()) { setHits(undefined); return; }
-    const t = setTimeout(() => api.searchContext(q).then(setHits).catch(e => setError(String(e.message ?? e))), 250);
+    const t = setTimeout(() => api.searchContext(q).then(r => { setHits(r.hits); setSemantic(r.embeddingError); }).catch(e => setError(String(e.message ?? e))), 250);
     return () => clearTimeout(t);
   }, [q]);
 
@@ -102,7 +104,14 @@ export function Context() {
       </section>
 
       <section className="card">
-        <h2>Search</h2>
+        <div className="row">
+          <h2 className="grow">Search</h2>
+          <span className={`pill ${server?.embeddings.provider === 'ollama' && !semantic ? 'pill-ok' : ''}`}
+            title={semantic ?? (server?.embeddings.provider === 'ollama' ? `Keyword + meaning search with ${server.embeddings.model}` : 'Turn on meaning search in Settings')}>
+            {server?.embeddings.provider === 'ollama' ? (semantic ? 'keywords only: embeddings failed' : 'keywords + meaning') : 'keywords'}
+          </span>
+        </div>
+        {semantic && <p className="muted small">{semantic}</p>}
         <input className="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Try a task, e.g. “deploy to staging”: this is what an agent would be shown" />
         <div className="hits">
           {hits?.length === 0 && <div className="muted small pad">Nothing matches.</div>}

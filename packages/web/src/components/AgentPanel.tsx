@@ -1,7 +1,8 @@
 // Side panel for the clicked agent: live log, steer box, interrupt/stop/remove.
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
-import { useStore, sinceClear } from '../store.ts';
+import { useStore, sinceClear, fmtTokens, fmtCost } from '../store.ts';
+import { WorktreeBar } from './WorktreeBar.tsx';
 import { SessionButtons } from './SessionButtons.tsx';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { avatarFor } from '../avatars/index.ts';
@@ -15,6 +16,8 @@ export function AgentPanel() {
   const setHistory = useStore(s => s.setHistory);
   const mode = useStore(s => s.server?.coordinatorMode);
   const coordinator = useStore(s => Object.values(s.agents).find(a => a.role === 'coordinator'));
+  const usage = useStore(s => (id ? s.usage[id] : undefined));
+  const allTasks = useStore(s => s.tasks);
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const [hideStatus, setHideStatus] = useState(true);
@@ -33,7 +36,8 @@ export function AgentPanel() {
   }, [events?.length, id]);
 
   if (!id || !agent) return null;
-  const shown = sinceClear(events).filter(e => !hideStatus || e.type !== 'status');
+  const shown = sinceClear(events).filter(e => !hideStatus || (e.type !== 'status' && e.type !== 'usage'));
+  const myTasks = Object.values(allTasks).filter(t => t.owner === agent.id && t.status !== 'done').sort((a, b) => a.createdAt - b.createdAt);
   const busy = ['thinking', 'working', 'starting'].includes(agent.status);
   // In "agent coordinates" mode, instructions for workers go through the coordinator.
   const viaCoordinator = mode === 'agent' && agent.role === 'worker' && !!coordinator;
@@ -63,8 +67,19 @@ export function AgentPanel() {
         <button className="icon-btn" onClick={() => select(undefined)} aria-label="Close">✕</button>
       </header>
       <div className="panel-sub muted small" title={agent.cwd}>📁 {agent.cwd}{agent.nativeSessionId ? ` · session ${agent.nativeSessionId.slice(0, 12)}` : ''}</div>
+      {usage && (
+        <div className="panel-sub usage-line small" title={`${usage.turns} turns · ${usage.input.toLocaleString()} in · ${usage.output.toLocaleString()} out${usage.cacheRead ? ` · ${usage.cacheRead.toLocaleString()} from cache` : ''}`}>
+          ◔ {fmtTokens(usage.input + usage.output)} tokens <span className="muted">({fmtTokens(usage.input)} in, {fmtTokens(usage.output)} out)</span>{usage.cost ? <> · <span className="cost">{fmtCost(usage.cost)}</span></> : ''}
+        </div>
+      )}
+      <WorktreeBar agent={agent} onError={setError} />
+      {myTasks.length > 0 && (
+        <div className="panel-tasks">
+          {myTasks.map(t => <div key={t.id} className={`ptask ptask-${t.status}`} title={t.note}><span className="ptask-st">{t.status}</span>{t.title}</div>)}
+        </div>
+      )}
       <div className="row panel-tools">
-        <label className="check"><input type="checkbox" checked={hideStatus} onChange={e => setHideStatus(e.target.checked)} /> hide status lines</label>
+        <label className="check"><input type="checkbox" checked={hideStatus} onChange={e => setHideStatus(e.target.checked)} /> hide status and usage lines</label>
         <div className="grow" />
         <SessionButtons agent={agent} onError={setError} />
         <button className="btn small" disabled={!busy} onClick={() => act(() => api.interrupt(agent.id))}>Interrupt</button>

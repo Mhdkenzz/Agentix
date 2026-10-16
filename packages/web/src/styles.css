@@ -267,3 +267,50 @@ kbd { background: var(--panel2); border: 1px solid var(--line2); border-bottom-w
 .setup-pick { margin-top: 14px; }
 .span2 { grid-column: 1 / -1; margin: 4px 0 10px !important; }
 .setup textarea { resize: vertical; }
+
+/* usage, worktrees, tasks */
+.c-tokens { color: var(--info); }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-line { color: var(--info); }
+.usage-line .cost { color: var(--warn); }
+.branch-tag { color: var(--pink); margin-right: 5px; }
+.worktree { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 16px; border-top: 1px solid var(--line); }
+.worktree .branch { color: var(--pink); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.merge:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
+.diff-modal { width: min(1000px, 100%); }
+.diff-files { margin: 8px 0; max-height: 120px; overflow-y: auto; }
+.f-add { color: var(--ok); } .f-mod { color: var(--warn); } .f-del { color: var(--err); }
+.diff { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.45; max-height: 62vh; overflow: auto; margin: 0; }
+.d-add { color: var(--ok); } .d-del { color: var(--err); } .d-hunk { color: var(--info); } .d-file { color: var(--text); font-weight: 600; }
+.panel-tasks { padding: 6px 16px 8px; display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); }
+.ptask { font-size: 12px; display: flex; gap: 8px; align-items: baseline; }
+.ptask-st { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; width: 52px; flex: none; }
+.ptask-doing .ptask-st { color: var(--ok); } .ptask-todo .ptask-st { color: var(--muted); } .ptask-review .ptask-st { color: var(--think); } .ptask-blocked .ptask-st { color: var(--err); }
+.wt-check { margin-top: 12px !important; align-items: flex-start; }
+.wt-check input { margin-top: 2px; }
+.desk-task { max-width: 200px; font-size: 11px; background: rgba(0,0,0,.85); border: 1px solid rgba(52,211,153,.35); color: var(--ok); padding: 1px 8px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desk-task-todo { color: var(--muted); border-color: var(--line2); }
+.desk-task-review { color: var(--think); border-color: rgba(167,139,250,.4); }
+.desk-task-blocked { color: var(--err); border-color: rgba(248,113,113,.4); }
+.tasks { display: flex; flex-direction: column; }
+.tasks .who-filter { width: auto; margin-bottom: 16px; }
+.add-task { margin-bottom: 14px; max-width: 900px; }
+.add-task select { width: auto; }
+.board { flex: 1; min-height: 320px; display: grid; grid-template-columns: repeat(5, minmax(200px, 1fr)); gap: 12px; overflow-x: auto; }
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; transition: border-color .15s; border-top: 2px solid var(--line2); }
+.col.over { border-color: var(--think); }
+.col h3 { margin: 2px 4px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.col-todo { border-top-color: var(--muted); } .col-doing { border-top-color: var(--ok); } .col-review { border-top-color: var(--think); }
+.col-done { border-top-color: var(--info); } .col-blocked { border-top-color: var(--err); }
+.col-doing h3 { color: var(--ok); } .col-review h3 { color: var(--think); } .col-done h3 { color: var(--info); } .col-blocked h3 { color: var(--err); }
+.task { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; cursor: grab; display: flex; flex-direction: column; gap: 6px; }
+.task:hover { border-color: var(--line2); }
+.task-title { font-size: 13px; word-break: break-word; }
+.task-note { font-size: 12px; color: var(--muted); white-space: pre-wrap; border-left: 2px solid var(--line2); padding-left: 8px; }
+.task-meta { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.task-meta select { font-size: 11px; padding: 1px 4px; }
+.task-meta .icon-btn { font-size: 12px; align-self: center; }
+.owner { display: inline-flex; gap: 5px; align-items: center; background: none; border: 0; padding: 0; color: var(--text); cursor: pointer; }
+.owner:hover { color: var(--think); }
+.col-done .task { opacity: .7; }
+@media (max-width: 720px) { .board { grid-template-columns: repeat(5, 240px); } }

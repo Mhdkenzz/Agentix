@@ -193,3 +193,16 @@ PW_CHROMIUM=/opt/pw-browsers/chromium npm run e2e   # this machine: use the prei
 ```
 
 CI runs them after the dashboard build check and uploads `playwright-report/` when they fail.
+
+## Worktrees, tasks, usage, retention, smarter memory, more agents (2026-10-16)
+- Git worktree per worker: a worker in a git repo gets its own branch and folder. The agent panel shows the
+  branch and changed files, a Diff view, and Merge (into the repo's checked-out branch) / Discard. Setting and
+  a per-agent checkbox turn it off; `@@spawn ... worktree=no` too.
+- Task board (`/tasks`): five columns, drag cards between them. The coordinator plans with `@@task`; a worker's
+  tasks move to doing / review / blocked on their own. Each desk in the office shows its agent's current task.
+- Usage meter: adapters emit `usage` events from the CLI's token counts; "tokens today" in the top bar,
+  tokens and cost per agent on the Agents page and in the agent panel.
+- Event log retention: the database keeps detailed events for `retentionDays` (30); history files keep all.
+- Smarter memory: optional local embeddings through Ollama, fused with BM25. Settings has a Test button; the
+  Context page shows which search ran.
+- New adapters: Gemini CLI, Aider, Goose (written from their docs, not yet run against the real CLIs).

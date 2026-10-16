@@ -24,6 +24,9 @@ export function AgentSeat({ agent, position, selected, deskColor }: { agent: Age
   const ring = useRef<Mesh>(null);
   const [hover, setHover] = useState(false);
   const select = useStore(s => s.select);
+  // the task this agent is on, shown on its desk tag
+  const task = useStore(s => Object.values(s.tasks).find(t => t.owner === agent.id && t.status === 'doing')
+    ?? Object.values(s.tasks).find(t => t.owner === agent.id && (t.status === 'todo' || t.status === 'review' || t.status === 'blocked')));
   const status = agent.status;
   const working = status === 'working' || status === 'starting';
   const phase = useRef(Math.random() * 10).current;
@@ -74,6 +77,7 @@ export function AgentSeat({ agent, position, selected, deskColor }: { agent: Age
               <span className="kind">{agent.kind}</span>
             </div>
             {ROLE_BADGE[agent.role] && <div className="role-badge">{ROLE_BADGE[agent.role]}</div>}
+            {task && <div className={`desk-task desk-task-${task.status}`} title={task.title}>☑ {task.title}</div>}
           </div>
         </Html>
         {status === 'error' && <pointLight position={[0, 1.5, 0.5]} color="#ff3344" intensity={2} distance={3} />}
