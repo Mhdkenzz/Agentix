@@ -1,234 +1,280 @@
 #!/usr/bin/env node
-// Agentix CLI — agentix command
+// Agentix CLI — agentix command. Talks to the server over HTTP/SSE only
+// (`server` and `doctor` are the exceptions: they run/inspect things locally).
 import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline';
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { createAgentixServer } from '../../server/src/index.ts';
-import { store } from '../../server/src/store.ts';
-import { getAdapter, getAdapterNames } from '../../server/src/adapters/index.ts';
+import { resolve } from 'node:path';
 
-const SERVER_URL = 'http://127.0.0.1:4317';
-
-function api(path: string, method = 'GET', body?: any): Promise<any> {
-  const { fetch } = globalThis as any;
-  const opts: any = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body) opts.body = JSON.stringify(body);
-  return fetch(`${SERVER_URL}${path}`, opts).then(r => r.json());
-}
-
-function getColor(id: string): string {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = id.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const colors = ['\x1b[36m', '\x1b[32m', '\x1b[33m', '\x1b[35m', '\x1b[34m', '\x1b[37m', '\x1b[95m', '\x1b[93m'];
-  return colors[Math.abs(hash) % colors.length];
-}
+const PORT = Number(process.env.AGENTIX_PORT) || 4317;
+const SERVER_URL = process.env.AGENTIX_URL || `http://127.0.0.1:${PORT}`;
 
 const RESET = '\x1b[0m';
+const DIM = '\x1b[90m';
+const GREEN = '\x1b[32m';
+const RED = '\x1b[31m';
+const COLORS = ['\x1b[36m', '\x1b[32m', '\x1b[33m', '\x1b[35m', '\x1b[34m', '\x1b[95m', '\x1b[93m', '\x1b[96m'];
 
-async function cmdDoctor() {
-  const { execSync } = await import('node:child_process');
-  const nodeVer = process.version;
-
-  // Check sqlite
-  let sqliteType: string;
-  try {
-    const sqliteModule = await import('node:sqlite');
-    sqliteType = `sqlite (${sqliteModule.Database ? 'native' : 'missing'})`;
-  } catch {
-    sqliteType = 'json (fallback)';
-  }
-
-  console.log(`\n  Agentix Doctor\n${'='.repeat(20)}`);
-  console.log(`  Node: ${nodeVer}`);
-  console.log(`  Store: ${store.getStoreType()}`);
-
-  // Check adapters
-  const adapters = await api('/api/adapters').catch(() => ({ adapters: [] }));
-  console.log(`\n  Installed agents:`);
-  for (const a of adapters.adapters || []) {
-    console.log(`    ${a.kind}: ${a.installed ? `\x1b[32m✓\x1b[0m ${a.version || 'installed'}` : '\x1b[31m✗\x1b[0m not found'}`);
-  }
-  console.log('');
+function color(id = ''): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  return COLORS[Math.abs(hash) % COLORS.length];
 }
 
+class CliError extends Error {}
+
+async function api(path: string, method = 'GET', body?: unknown): Promise<any> {
+  let res: Response;
+  try {
+    res = await fetch(`${SERVER_URL}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new CliError(`can't reach the agentix server at ${SERVER_URL}. Start it with: agentix server`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new CliError(data.error || `${method} ${path} failed with ${res.status}`);
+  return data;
+}
+
+// ---------- SSE client (Node has no EventSource) ----------
+
+interface SSEMessage { id?: string; event: string; data: string }
+
+/** Read one SSE connection until it ends. Handles named events, ids and comments. */
+async function readSSE(url: string, lastId: string | undefined, onMessage: (m: SSEMessage) => void, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(url, {
+    headers: { Accept: 'text/event-stream', ...(lastId ? { 'Last-Event-ID': lastId } : {}) },
+    signal,
+  });
+  if (!res.ok || !res.body) throw new CliError(`stream failed: ${res.status}`);
+  const decoder = new TextDecoder();
+  let buf = '';
+  for await (const chunk of res.body as any as AsyncIterable<Uint8Array>) {
+    buf += decoder.decode(chunk, { stream: true }).replace(/\r\n?/g, '\n');
+    let sep: number;
+    while ((sep = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const msg: SSEMessage = { event: 'message', data: '' };
+      const data: string[] = [];
+      for (const line of block.split('\n')) {
+        if (!line || line.startsWith(':')) continue;
+        const i = line.indexOf(':');
+        const field = i < 0 ? line : line.slice(0, i);
+        const value = i < 0 ? '' : line.slice(i + 1).replace(/^ /, '');
+        if (field === 'id') msg.id = value;
+        else if (field === 'event') msg.event = value;
+        else if (field === 'data') data.push(value);
+      }
+      if (!data.length) continue;
+      msg.data = data.join('\n');
+      onMessage(msg);
+    }
+  }
+}
+
+/** Follow a stream forever, reconnecting with Last-Event-ID. */
+async function followSSE(url: string, onEvent: (e: any) => void): Promise<never> {
+  let lastId: string | undefined;
+  let warned = false;
+  for (;;) {
+    try {
+      await readSSE(url, lastId, m => {
+        if (m.id) lastId = m.id;
+        try { onEvent(JSON.parse(m.data)); } catch { /* not JSON */ }
+      });
+      warned = false;
+    } catch (err: any) {
+      if (!warned) console.error(`${RED}stream disconnected (${err?.message ?? err}); retrying…${RESET}`);
+      warned = true;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+// ---------- formatting ----------
+
+const names = new Map<string, string>();
+
+function formatEvent(e: any): string {
+  const ts = new Date(e.ts).toLocaleTimeString();
+  const who = names.get(e.agentId) ? `${names.get(e.agentId)} ${e.agentId}` : e.agentId;
+  const from = e.from && e.from !== 'user' && e.from !== e.agentId ? ` ${DIM}from ${names.get(e.from) ?? e.from}${RESET}` : '';
+  const text = e.type === 'status' ? `${e.data?.status ?? e.text} ${DIM}${e.data?.activity ?? ''}${RESET}` : (e.text ?? '');
+  return `${color(e.agentId)}${ts} [${who}]${RESET} ${e.type}${from}: ${text}`;
+}
+
+function trackNames(e: any) {
+  if ((e.type === 'agent.created' || e.type === 'agent.updated') && e.data?.name) names.set(e.agentId, e.data.name);
+}
+
+async function loadNames() {
+  try {
+    for (const a of (await api('/api/agents')).agents) names.set(a.id, a.name);
+  } catch { /* server down: followSSE will say so */ }
+}
+
+// ---------- commands ----------
+
 async function cmdServer() {
-  const { server, sessionManager } = createAgentixServer();
+  const { startServer } = await import('../../server/src/index.ts');
+  const { store } = await import('../../server/src/store.ts');
+  const { server, sessionManager, port } = await startServer(PORT);
+  console.log(`${GREEN}✓${RESET} Agentix server running on \x1b[36mhttp://127.0.0.1:${port}${RESET}`);
+  console.log(`${DIM}  Store: ${store.getStoreType()}  |  Press Ctrl+C to stop${RESET}\n`);
 
-  server.listen(4317, '127.0.0.1', () => {
-    console.log(`\x1b[32m✓\x1b[0m Agentix server running on \x1b[36mhttp://127.0.0.1:4317\x1b[0m`);
-    console.log(`\x1b[90m  Store: ${store.getStoreType()}  |  Press Ctrl+C to stop\x1b[0m\n`);
-  });
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) process.exit(1);
+    stopping = true;
+    console.log(`\n${DIM}Stopping agents and shutting down…${RESET}`);
+    await sessionManager.shutdown();
+    server.close();
+    server.closeAllConnections?.();
+    process.exit(0);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+}
 
-  process.on('SIGINT', () => {
-    console.log('\n\x1b[90mShutting down...\x1b[0m');
-    server.close(() => process.exit(0));
-  });
+async function cmdDoctor() {
+  const { getAllAdapters } = await import('../../server/src/adapters/index.ts');
+  let sqlite = false;
+  try { sqlite = !!(process as any).getBuiltinModule('node:sqlite')?.DatabaseSync; } catch { /* old node */ }
+
+  console.log(`\n  Agentix Doctor\n  ${'='.repeat(20)}`);
+  console.log(`  Node:   ${process.version}`);
+  console.log(`  Store:  ${sqlite ? 'sqlite' : 'json (node:sqlite unavailable)'}${process.env.AGENTIX_STORE === 'json' ? ' — forced to json by AGENTIX_STORE' : ''}`);
+  let serverUp = false;
+  try { await api('/api/agents'); serverUp = true; } catch { /* down */ }
+  console.log(`  Server: ${serverUp ? `${GREEN}up${RESET} at ${SERVER_URL}` : `${DIM}not running (${SERVER_URL})${RESET}`}`);
+
+  console.log(`\n  Agent CLIs:`);
+  for (const a of getAllAdapters()) {
+    const d = await a.detect();
+    console.log(`    ${a.kind.padEnd(9)} ${d.installed ? `${GREEN}✓${RESET} ${d.version ?? ''}` : `${RED}✗${RESET} not found`}`);
+  }
+  console.log('');
 }
 
 async function cmdSpawn(args: string[]) {
-  let kind = '', role = 'worker', avatarId: number | 'random' = 0, cwd = '.', prompt = '';
-  let i = 0;
-
-  while (i < args.length) {
-    const arg = args[i];
-    if (arg === '--role' && args[i + 1]) { role = args[i + 1]; i += 2; continue; }
-    if (arg === '--avatar' && args[i + 1]) { avatarId = args[i + 1] === 'random' ? 'random' : parseInt(args[i + 1], 10); i += 2; continue; }
-    if (arg === '--cwd' && args[i + 1]) { cwd = args[i + 1]; i += 2; continue; }
-    if (!kind && getAdapterNames().includes(arg)) { kind = arg; i++; continue; }
-    if (!prompt) { prompt += (prompt ? ' ' : '') + arg; i++; continue; }
-    i++;
-  }
-
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      role: { type: 'string', default: 'worker' },
+      avatar: { type: 'string', default: 'random' },
+      cwd: { type: 'string' },
+      name: { type: 'string' },
+      replace: { type: 'boolean', default: false },
+    },
+  });
+  const [kind, ...rest] = positionals;
   if (!kind) {
-    console.error('Usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--cwd <dir>] "<prompt>"');
-    console.error(`Available kinds: ${getAdapterNames().join(', ')}`);
-    process.exit(1);
+    throw new CliError('usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--name N] [--cwd DIR] [--replace] "<prompt>"');
   }
-
-  const result = await api('/api/agents', 'POST', { kind, role, avatarId, cwd, prompt });
-  const a = result.agent;
-  const color = getColor(a.id);
-  console.log(`${color}✓ Spawned agent ${a.id} (${a.name})\x1b[0m`);
-  console.log(`  kind: ${a.kind}  |  role: ${a.role}  |  avatar: ${a.avatarId}  |  status: ${a.status}`);
-  if (a.prompt) console.log(`  prompt: ${a.prompt}`);
-  console.log('');
+  const avatarId = values.avatar === 'random' ? 'random' : Number(values.avatar);
+  const { agent: a } = await api('/api/agents', 'POST', {
+    kind,
+    role: values.role,
+    avatarId,
+    name: values.name,
+    cwd: values.cwd ? resolve(values.cwd) : undefined,
+    prompt: rest.join(' ') || undefined,
+    replace: values.replace,
+  });
+  console.log(`${color(a.id)}✓ Spawned ${a.name} (${a.id})${RESET}`);
+  console.log(`  kind: ${a.kind}  |  role: ${a.role}  |  avatar: ${a.avatarId}  |  status: ${a.status}  |  cwd: ${a.cwd}\n`);
 }
 
 async function cmdLs() {
-  const result = await api('/api/agents');
-  const agents = result.agents || [];
+  const { agents } = await api('/api/agents');
+  if (!agents.length) { console.log(`${DIM}No agents.${RESET}`); return; }
+  console.log(`\x1b[1m${'ID'.padEnd(9)} ${'NAME'.padEnd(8)} ${'KIND'.padEnd(9)} ${'ROLE'.padEnd(12)} ${'STATUS'.padEnd(9)} ACTIVITY${RESET}`);
+  console.log('─'.repeat(80));
+  for (const a of agents) {
+    console.log(`${color(a.id)}${a.id.padEnd(9)} ${a.name.padEnd(8)} ${a.kind.padEnd(9)} ${a.role.padEnd(12)} ${a.status.padEnd(9)} ${a.activity}${RESET}`);
+  }
+  console.log('');
+}
 
-  if (agents.length === 0) {
-    console.log('\x1b[90mNo agents.\x1b[0m');
+async function cmdLogs(args: string[]) {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { follow: { type: 'boolean', short: 'f', default: false } } });
+  const id = positionals[0];
+  if (!id) throw new CliError('usage: agentix logs <id> [-f]');
+  const { agent } = await api(`/api/agents/${encodeURIComponent(id)}`);
+  names.set(agent.id, agent.name);
+  if (!values.follow) {
+    for (const e of (await api(`/api/agents/${encodeURIComponent(id)}/events`)).events) console.log(formatEvent(e));
     return;
   }
-
-  const header = `\x1b[1m${'ID'.padEnd(8)} ${'NAME'.padEnd(10)} ${'KIND'.padEnd(10)} ${'ROLE'.padEnd(12)} ${'STATUS'.padEnd(14)} ACTIVITY\x1b[0m`;
-  console.log(header);
-  console.log('─'.repeat(80));
-
-  for (const a of agents) {
-    const color = getColor(a.id);
-    console.log(`${color}${a.id.padEnd(8)} ${a.name.padEnd(10)} ${a.kind.padEnd(10)} ${a.role.padEnd(12)} ${a.status.padEnd(14)} ${a.activity}\x1b[0m`);
-  }
-  console.log('');
-}
-
-async function cmdLogs(agentId: string, follow = false) {
-  let lastId = 0;
-
-  async function fetchEvents() {
-    const result = await api(`/api/agents/${agentId}/events?after=${lastId}`);
-    const events = result.events || [];
-    for (const e of events) {
-      lastId = e.id;
-      const color = getColor(e.agentId);
-      const ts = new Date(e.ts).toLocaleTimeString();
-      console.log(`${color}${ts}\x1b[0m [${e.agentId}] ${e.type}: ${e.text || ''}`);
-    }
-    return events.length;
-  }
-
-  let count = await fetchEvents();
-  if (!follow || count > 0) return;
-
-  console.log(`\x1b[90mFollowing events for ${agentId}... (Ctrl+C to stop)\x1b[0m\n`);
-
-  const interval = setInterval(async () => {
-    const c = await fetchEvents();
-    if (c === 0) {
-      clearInterval(interval);
-      console.log('\x1b[90mNo more events.\x1b[0m');
-    }
-  }, 1000);
-
-  process.on('SIGINT', () => { clearInterval(interval); process.exit(0); });
-}
-
-async function cmdSteer(agentId: string, text: string) {
-  const result = await api(`/api/agents/${agentId}/steer`, 'POST', { text });
-  const color = getColor(agentId);
-  console.log(`${color}✓ Steered ${agentId}\x1b[0m: "${text}"`);
-  console.log('');
-}
-
-async function cmdStop(agentId: string) {
-  await api(`/api/agents/${agentId}/interrupt`, 'POST');
-  const color = getColor(agentId);
-  console.log(`${color}✓ Stopped ${agentId}\x1b[0m`);
-  console.log('');
-}
-
-async function cmdRm(agentId: string) {
-  await api(`/api/agents/${agentId}`, 'DELETE');
-  const color = getColor(agentId);
-  console.log(`${color}✓ Removed ${agentId}\x1b[0m`);
-  console.log('');
+  console.log(`${DIM}Following ${agent.name} (${id})… Ctrl+C to stop${RESET}\n`);
+  await followSSE(`${SERVER_URL}/api/agents/${encodeURIComponent(id)}/stream?after=0`, e => { trackNames(e); console.log(formatEvent(e)); });
 }
 
 async function cmdWatch() {
-  console.log('\x1b[90mWatching all agents... (Ctrl+C to stop)\x1b[0m\n');
-
-  const es = new EventSource(`${SERVER_URL}/api/stream`);
-
-  es.onmessage = (event: any) => {
-    try {
-      const data = JSON.parse(event.data);
-      const color = getColor(data.agentId);
-      const ts = new Date(data.ts).toLocaleTimeString();
-      console.log(`${color}${ts}\x1b[0m [${data.agentId}] ${data.type}: ${data.text || ''}`);
-    } catch { /* ignore parse errors */ }
-  };
-
-  es.onerror = () => {
-    console.error('\x1b[31mConnection lost. Reconnecting...\x1b[0m');
-  };
-
-  process.on('SIGINT', () => { es.close(); process.exit(0); });
+  await loadNames();
+  console.log(`${DIM}Watching all agents… Ctrl+C to stop${RESET}\n`);
+  await followSSE(`${SERVER_URL}/api/stream?tail=20`, e => { trackNames(e); console.log(formatEvent(e)); });
 }
 
-// Main CLI entry
+async function needId(args: string[], usage: string): Promise<string> {
+  if (!args[0]) throw new CliError(`usage: ${usage}`);
+  return encodeURIComponent(args[0]);
+}
+
+const HELP = `\x1b[1mAgentix\x1b[0m — AI agent orchestration
+
+  Usage:
+    agentix server                          Start the server (AGENTIX_PORT, default 4317)
+    agentix doctor                          Check node, store and installed agent CLIs
+    agentix spawn <kind> [opts] "<prompt>"  Spawn an agent (kinds: mock, codex, opencode, claude)
+        --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --replace
+    agentix ls                              List agents
+    agentix logs <id> [-f]                  Show (or follow) an agent's events
+    agentix steer <id> "<text>"             Interrupt if busy, then continue the session with <text>
+    agentix stop <id>                       Stop the current turn
+    agentix rm <id>                         Stop and remove an agent
+    agentix watch                           Live feed of all agents
+`;
+
 async function main() {
-  const args = process.argv.slice(2);
-  const cmd = args[0];
-
-  if (!cmd) {
-    console.log(`\x1b[1mAgentix\x1b[0m — AI agent orchestration\n`);
-    console.log('  Usage:');
-    console.log('    agentix server                         Start the server');
-    console.log('    agentix doctor                         Check environment');
-    console.log('    agentix spawn <kind> [opts] "<prompt>"  Spawn an agent');
-    console.log('    agentix ls                             List agents');
-    console.log('    agentix logs <id> [-f]                 Show events');
-    console.log('    agentix steer <id> "<text>"            Steer an agent');
-    console.log('    agentix stop <id>                      Stop an agent');
-    console.log('    agentix rm <id>                        Remove an agent');
-    console.log('    agentix watch                          Live feed');
-    console.log('');
-    return;
-  }
-
+  const [cmd, ...args] = process.argv.slice(2);
   switch (cmd) {
-    case 'server': await cmdServer(); break;
-    case 'doctor': await cmdDoctor(); break;
-    case 'spawn': await cmdSpawn(args.slice(1)); break;
-    case 'ls': await cmdLs(); break;
-    case 'logs': await cmdLogs(args[1], args.includes('-f')); break;
-    case 'steer': await cmdSteer(args[1], args.slice(2).join(' ')); break;
-    case 'stop': await cmdStop(args[1]); break;
-    case 'rm': await cmdRm(args[1]); break;
-    case 'watch': await cmdWatch(); break;
+    case undefined: case 'help': case '--help': case '-h': console.log(HELP); return;
+    case 'server': return cmdServer();
+    case 'doctor': return cmdDoctor();
+    case 'spawn': return cmdSpawn(args);
+    case 'ls': return cmdLs();
+    case 'logs': return cmdLogs(args);
+    case 'watch': return cmdWatch();
+    case 'steer': {
+      const id = await needId(args, 'agentix steer <id> "<text>"');
+      const text = args.slice(1).join(' ');
+      if (!text) throw new CliError('usage: agentix steer <id> "<text>"');
+      await api(`/api/agents/${id}/steer`, 'POST', { text });
+      console.log(`${color(args[0])}✓ Steered ${args[0]}${RESET}: "${text}"`);
+      return;
+    }
+    case 'stop': {
+      const id = await needId(args, 'agentix stop <id>');
+      await api(`/api/agents/${id}/interrupt`, 'POST');
+      console.log(`${color(args[0])}✓ Stopped ${args[0]}${RESET}`);
+      return;
+    }
+    case 'rm': {
+      const id = await needId(args, 'agentix rm <id>');
+      await api(`/api/agents/${id}`, 'DELETE');
+      console.log(`${color(args[0])}✓ Removed ${args[0]}${RESET}`);
+      return;
+    }
     default:
-      console.error(`Unknown command: ${cmd}`);
-      process.exit(1);
+      throw new CliError(`unknown command: ${cmd}\n\n${HELP}`);
   }
 }
 
 main().catch(err => {
-  console.error('Error:', err.message);
+  console.error(`${RED}Error:${RESET} ${err?.message ?? err}`);
   process.exit(1);
 });

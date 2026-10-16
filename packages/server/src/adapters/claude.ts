@@ -1,74 +1,50 @@
 // Agentix — Claude Code CLI adapter
-// WARNING: kenz loses access on Oct 17. Write it but don't block on testing.
-// Flags: `claude -p "<prompt>" --output-format stream-json --verbose`
-// Resume: `--resume <session_id>`
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type { AgentEvent } from '../../shared/src/types.ts';
-import type { AgentAdapter, AdapterContext } from './types';
+// kenz loses Claude Code access on 2026-10-17; this is kept for later, tested only with a fake CLI.
+// Flags from `claude --help`:
+//   claude -p --output-format stream-json --verbose --permission-mode acceptEdits [--resume <id>] -- <prompt>
+// stream-json lines: {type:'system',subtype:'init',session_id}, {type:'assistant',message:{content:[...]}},
+//   {type:'result',is_error,result,session_id}
+import type { AgentAdapter, AdapterContext } from './types.ts';
+import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
 
-const execFileAsync = promisify(execFile);
+export function claudeArgs(prompt: string, sessionId?: string): string[] {
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits'];
+  if (sessionId) args.push('--resume', sessionId);
+  args.push('--', prompt);
+  return args;
+}
+
+export function handleClaudeEvent(ctx: AdapterContext, ev: any): void {
+  if (ev.session_id && ev.session_id !== ctx.agent.nativeSessionId) ctx.setNativeSessionId(String(ev.session_id));
+
+  if (ev.type === 'assistant') {
+    for (const block of ev.message?.content ?? []) {
+      if (block.type === 'text' && block.text) {
+        ctx.emit({ type: 'output', text: String(block.text) });
+      } else if (block.type === 'tool_use') {
+        const input = block.input ?? {};
+        const tool = `${block.name}${input.command ? `: ${oneLine(input.command)}` : input.file_path ? `: ${input.file_path}` : ''}`;
+        ctx.emit({ type: 'tool', text: tool, data: block });
+        ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
+      } else if (block.type === 'thinking') {
+        ctx.emit({ type: 'status', text: 'thinking', data: { status: 'thinking', activity: 'thinking…' } });
+      }
+    }
+  } else if (ev.type === 'result' && ev.is_error) {
+    ctx.emit({ type: 'error', text: String(ev.result ?? 'claude error'), data: ev });
+  }
+}
 
 export const claudeAdapter: AgentAdapter = {
   kind: 'claude',
 
-  async detect() {
-    try {
-      const { stdout } = await execFileAsync('which', ['claude']);
-      return { installed: true, version: 'unknown' };
-    } catch {
-      return { installed: false };
-    }
-  },
+  detect: () => detectCli('claude'),
 
-  async send(ctx: AdapterContext, prompt: string) {
-    const args: string[] = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
-    const env = { ...process.env, CWD: ctx.agent.cwd };
-
-    if (ctx.agent.nativeSessionId) {
-      args.splice(1, 0, '--resume', ctx.agent.nativeSessionId);
-    }
-
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'working', data: { status: 'working', activity: `running claude -p "${prompt.slice(0, 40)}..."` } });
-
-    const child = execFileAsync('claude', args, {
-      cwd: ctx.agent.cwd,
-      maxBuffer: 10 * 1024 * 1024,
-      env,
+  async send(ctx, prompt) {
+    await runCli(ctx, 'claude', claudeArgs(prompt, ctx.agent.nativeSessionId), line => {
+      const ev = parseJson(line);
+      if (ev) handleClaudeEvent(ctx, ev);
+      else ctx.emit({ type: 'output', text: line });
     });
-
-    child.stdout?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.type === 'init' || parsed.type === 'system') {
-            const sid = (parsed.data as any)?.sessionId || (parsed.data as any)?.id;
-            if (sid && !ctx.agent.nativeSessionId) {
-              ctx.setNativeSessionId(String(sid));
-            }
-          } else if (parsed.type === 'output' || parsed.type === 'message' || parsed.type === 'text') {
-            ctx.emit({ agentId: ctx.agent.id, type: 'output', text: String((parsed.data as any)?.content ?? line) });
-          } else if (parsed.type === 'tool' || parsed.type === 'command' || parsed.type === 'patch') {
-            ctx.emit({ agentId: ctx.agent.id, type: 'tool', text: String((parsed.data as any)?.name ?? line) });
-          }
-        } catch {
-          // Plain text output
-          ctx.emit({ agentId: ctx.agent.id, type: 'output', text: line });
-        }
-      }
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      ctx.emit({ agentId: ctx.agent.id, type: 'error', text: data.toString().trim() });
-    });
-
-    await child;
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'idle', data: { status: 'idle', activity: 'idle' } });
-  },
-
-  async interrupt(ctx: AdapterContext) {
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'stopped', data: { status: 'stopped', activity: 'interrupted' } });
   },
 };

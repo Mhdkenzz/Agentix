@@ -1,31 +1,52 @@
-// Agentix — SQLite / JSON store
-import { randomUUID } from 'node:crypto';
+// Agentix — SQLite store (node:sqlite), with a JSON-file fallback behind the same interface
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import type { Agent, AgentEvent } from '../../shared/src/types.ts';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import type { Agent, AgentEvent, Status } from '../../shared/src/types.ts';
 
-const DB_PATH = join(homedir(), '.agentix', 'agentix.db');
-const JSON_PATH = join(homedir(), '.agentix', 'agentix.json');
+/** Data directory: $AGENTIX_HOME, else ~/.agentix. Tests point this at a temp dir. */
+export const AGENTIX_HOME = process.env.AGENTIX_HOME || join(homedir(), '.agentix');
+const DB_PATH = join(AGENTIX_HOME, 'agentix.db');
+const JSON_PATH = join(AGENTIX_HOME, 'agentix.json');
 
-// Ensure directory exists
-if (!existsSync(join(homedir(), '.agentix'))) {
-  try {
-    const { execSync } = await import('node:child_process');
-    execSync(`mkdir -p ${join(homedir(), '.agentix')}`);
-  } catch { /* best effort */ }
+mkdirSync(AGENTIX_HOME, { recursive: true });
+
+type NewEvent = Omit<AgentEvent, 'id' | 'ts' | 'agentId'>;
+
+export interface IStore {
+  getStoreType(): 'sqlite' | 'json';
+  getAgents(): Agent[];
+  getAgent(id: string): Agent | undefined;
+  createAgent(agent: Agent): void;
+  updateAgent(agent: Agent): void;
+  setStatus(id: string, status: Status, activity: string): void;
+  setNativeSessionId(id: string, sessionId: string): void;
+  removeAgent(id: string): void;
+  /** all events after `after`; with `limit`, only the latest `limit` of those */
+  getEvents(after?: number, limit?: number): AgentEvent[];
+  getAgentEvents(agentId: string, after?: number, limit?: number): AgentEvent[];
+  appendEvent(event: NewEvent, agentId: string): AgentEvent;
+  /** mark agents that were mid-turn when the server died; returns how many */
+  resetBusyAgents(): number;
 }
 
-let useSqlite = false;
-let sqlite: any = null;
+const BUSY: Status[] = ['starting', 'thinking', 'working'];
 
-// Try to use node:sqlite
-try {
-  const sqliteModule = await import('node:sqlite');
-  const Database = sqliteModule.Database;
-  sqlite = new Database(DB_PATH);
-  sqlite.exec('PRAGMA journal_mode=WAL;');
-  sqlite.exec(`
+// ---------- SQLite ----------
+
+function openSqlite(): IStore | null {
+  let DatabaseSync: any;
+  try {
+    // Loaded lazily so Node versions without node:sqlite fall back to JSON.
+    ({ DatabaseSync } = (process as any).getBuiltinModule('node:sqlite'));
+  } catch {
+    return null;
+  }
+  if (!DatabaseSync) return null;
+
+  const db = new DatabaseSync(DB_PATH);
+  db.exec(`
+    PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -43,194 +64,144 @@ try {
       agentId TEXT NOT NULL,
       type TEXT NOT NULL,
       ts INTEGER NOT NULL,
-      from TEXT,
+      sender TEXT,
       text TEXT,
       data TEXT
     );
-    CREATE INDEX IF NOT EXISTS events_agent_ts ON events(agentId, ts);
-    CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+    CREATE INDEX IF NOT EXISTS events_agent ON events(agentId, id);
   `);
-  useSqlite = true;
-} catch {
-  // Fall back to JSON store
-  useSqlite = false;
+
+  const toAgent = (r: any): Agent => ({
+    id: r.id, name: r.name, kind: r.kind, role: r.role, avatarId: r.avatarId,
+    cwd: r.cwd, status: r.status, activity: r.activity,
+    ...(r.nativeSessionId ? { nativeSessionId: r.nativeSessionId } : {}),
+    createdAt: r.createdAt,
+  });
+  const toEvent = (r: any): AgentEvent => ({
+    id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
+    ...(r.sender != null ? { from: r.sender } : {}),
+    ...(r.text != null ? { text: r.text } : {}),
+    ...(r.data != null ? { data: JSON.parse(r.data) } : {}),
+  });
+
+  const q = {
+    agents: db.prepare('SELECT * FROM agents ORDER BY createdAt ASC'),
+    agent: db.prepare('SELECT * FROM agents WHERE id = ?'),
+    insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=? WHERE id=?`),
+    setStatus: db.prepare('UPDATE agents SET status=?, activity=? WHERE id=?'),
+    setSession: db.prepare('UPDATE agents SET nativeSessionId=? WHERE id=?'),
+    deleteAgent: db.prepare('DELETE FROM agents WHERE id = ?'),
+    deleteEvents: db.prepare('DELETE FROM events WHERE agentId = ?'),
+    events: db.prepare('SELECT * FROM (SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC'),
+    agentEvents: db.prepare('SELECT * FROM (SELECT * FROM events WHERE agentId = ? AND id > ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC'),
+    insertEvent: db.prepare('INSERT INTO events (agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?)'),
+    insertEventWithId: db.prepare('INSERT INTO events (id, agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+    resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE status IN (${BUSY.map(() => '?').join(',')})`),
+    countAgents: db.prepare('SELECT COUNT(*) AS n FROM agents'),
+  };
+
+  const s: IStore = {
+    getStoreType: () => 'sqlite',
+    getAgents: () => q.agents.all().map(toAgent),
+    getAgent: id => { const r = q.agent.get(id); return r ? toAgent(r) : undefined; },
+    createAgent: a => {
+      q.insertAgent.run(a.id, a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.createdAt);
+    },
+    updateAgent: a => {
+      q.updateAgent.run(a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.id);
+    },
+    setStatus: (id, status, activity) => { q.setStatus.run(status, activity, id); },
+    setNativeSessionId: (id, sid) => { q.setSession.run(sid, id); },
+    removeAgent: id => { q.deleteAgent.run(id); q.deleteEvents.run(id); },
+    getEvents: (after = 0, limit = -1) => q.events.all(after, limit).map(toEvent),
+    getAgentEvents: (agentId, after = 0, limit = -1) => q.agentEvents.all(agentId, after, limit).map(toEvent),
+    appendEvent: (e, agentId) => {
+      const ts = Date.now();
+      const r = q.insertEvent.run(agentId, e.type, ts, e.from ?? null, e.text ?? null, e.data !== undefined ? JSON.stringify(e.data) : null);
+      return { ...e, id: Number(r.lastInsertRowid), ts, agentId };
+    },
+    resetBusyAgents: () => Number(q.resetBusy.run(...BUSY).changes),
+  };
+
+  // One-time import of the JSON store written by earlier versions.
+  if (existsSync(JSON_PATH) && (q.countAgents.get() as any).n === 0) {
+    try {
+      const data = JSON.parse(readFileSync(JSON_PATH, 'utf-8'));
+      db.exec('BEGIN');
+      for (const a of data.agents ?? []) s.createAgent(a);
+      for (const e of data.events ?? []) {
+        q.insertEventWithId.run(e.id, e.agentId, e.type, e.ts, e.from ?? null, e.text ?? null, e.data !== undefined ? JSON.stringify(e.data) : null);
+      }
+      db.exec('COMMIT');
+      renameSync(JSON_PATH, JSON_PATH + '.imported');
+    } catch {
+      try { db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+    }
+  }
+
+  return s;
 }
 
-// JSON store fallback
-let jsonAgents: Agent[] = [];
-let jsonEvents: AgentEvent[] = [];
-let jsonNextEventId = 1;
+// ---------- JSON fallback ----------
 
-function loadJsonStore() {
+function openJson(): IStore {
+  let agents: Agent[] = [];
+  let events: AgentEvent[] = [];
+  let nextEventId = 1;
   try {
     if (existsSync(JSON_PATH)) {
       const data = JSON.parse(readFileSync(JSON_PATH, 'utf-8'));
-      jsonAgents = data.agents || [];
-      jsonEvents = data.events || [];
-      jsonNextEventId = data.nextEventId || 1;
+      agents = data.agents || [];
+      events = data.events || [];
+      nextEventId = data.nextEventId || events.reduce((m, e) => Math.max(m, e.id), 0) + 1;
     }
   } catch { /* fresh start */ }
+
+  // Coalesce writes: an agent can emit dozens of events per second.
+  let saveTimer: NodeJS.Timeout | undefined;
+  const flush = () => {
+    saveTimer = undefined;
+    try { writeFileSync(JSON_PATH, JSON.stringify({ agents, events, nextEventId })); } catch { /* ignore */ }
+  };
+  const save = () => { if (!saveTimer) saveTimer = setTimeout(flush, 200); };
+  process.on('exit', () => { if (saveTimer) { clearTimeout(saveTimer); flush(); } });
+
+  const tail = (list: AgentEvent[], limit: number) => (limit < 0 ? list : limit === 0 ? [] : list.slice(-limit));
+  const patch = (id: string, fields: Partial<Agent>) => {
+    const a = agents.find(x => x.id === id);
+    if (a) { Object.assign(a, fields); save(); }
+  };
+
+  return {
+    getStoreType: () => 'json',
+    getAgents: () => agents.map(a => ({ ...a })),
+    getAgent: id => { const a = agents.find(x => x.id === id); return a ? { ...a } : undefined; },
+    createAgent: a => { agents.push({ ...a }); save(); },
+    updateAgent: a => patch(a.id, { ...a }),
+    setStatus: (id, status, activity) => patch(id, { status, activity }),
+    setNativeSessionId: (id, nativeSessionId) => patch(id, { nativeSessionId }),
+    removeAgent: id => {
+      agents = agents.filter(a => a.id !== id);
+      events = events.filter(e => e.agentId !== id);
+      save();
+    },
+    getEvents: (after = 0, limit = -1) => tail(events.filter(e => e.id > after), limit),
+    getAgentEvents: (agentId, after = 0, limit = -1) => tail(events.filter(e => e.agentId === agentId && e.id > after), limit),
+    appendEvent: (e, agentId) => {
+      const full: AgentEvent = { ...e, id: nextEventId++, ts: Date.now(), agentId };
+      events.push(full);
+      save();
+      return full;
+    },
+    resetBusyAgents: () => {
+      let n = 0;
+      for (const a of agents) if (BUSY.includes(a.status)) { a.status = 'idle'; a.activity = 'idle (server restarted)'; n++; }
+      if (n) save();
+      return n;
+    },
+  };
 }
 
-function saveJsonStore() {
-  try {
-    writeFileSync(JSON_PATH, JSON.stringify({
-      agents: jsonAgents,
-      events: jsonEvents,
-      nextEventId: jsonNextEventId,
-    }, null, 2));
-  } catch { /* ignore */ }
-}
-
-loadJsonStore();
-
-export interface IStore {
-  agents: Agent[];
-  getAgents(): Agent[];
-  getAgent(id: string): Agent | undefined;
-  createAgent(agent: Agent): void;
-  updateAgent(agent: Agent): void;
-  removeAgent(id: string): void;
-  events: AgentEvent[];
-  getEvents(after?: number): AgentEvent[];
-  getAgentEvents(agentId: string, after?: number): AgentEvent[];
-  appendEvent(event: Omit<AgentEvent, 'id' | 'ts' | 'agentId'>, agentId: string): AgentEvent;
-  getNextEventId(): number;
-  getStoreType(): 'sqlite' | 'json';
-}
-
-export const store: IStore = {
-  agents: [],
-  events: [],
-
-  getStoreType(): 'sqlite' | 'json' {
-    return useSqlite ? 'sqlite' : 'json';
-  },
-
-  getAgents(): Agent[] {
-    if (useSqlite) {
-      const rows = sqlite.exec('SELECT * FROM agents ORDER BY createdAt DESC');
-      return (rows || []).map((r: any) => ({
-        id: r.id, name: r.name, kind: r.kind, role: r.role,
-        avatarId: r.avatarId, cwd: r.cwd, status: r.status,
-        activity: r.activity, nativeSessionId: r.nativeSessionId,
-        createdAt: r.createdAt,
-      }));
-    }
-    return [...jsonAgents];
-  },
-
-  getAgent(id: string): Agent | undefined {
-    if (useSqlite) {
-      const rows = sqlite.exec('SELECT * FROM agents WHERE id = ?', id);
-      const row = rows?.[0];
-      if (!row) return undefined;
-      return {
-        id: row.id, name: row.name, kind: row.kind, role: row.role,
-        avatarId: row.avatarId, cwd: row.cwd, status: row.status,
-        activity: row.activity, nativeSessionId: row.nativeSessionId,
-        createdAt: row.createdAt,
-      };
-    }
-    return jsonAgents.find(a => a.id === id);
-  },
-
-  createAgent(agent: Agent): void {
-    if (useSqlite) {
-      sqlite.exec(`
-        INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, agent.id, agent.name, agent.kind, agent.role, agent.avatarId, agent.cwd, agent.status, agent.activity, agent.nativeSessionId ?? null, agent.createdAt);
-    } else {
-      jsonAgents.push(agent);
-      saveJsonStore();
-    }
-  },
-
-  updateAgent(agent: Agent): void {
-    if (useSqlite) {
-      sqlite.exec(`
-        UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=?, createdAt=?
-        WHERE id=?
-      `, agent.name, agent.kind, agent.role, agent.avatarId, agent.cwd, agent.status, agent.activity, agent.nativeSessionId ?? null, agent.createdAt, agent.id);
-    } else {
-      const idx = jsonAgents.findIndex(a => a.id === agent.id);
-      if (idx >= 0) {
-        jsonAgents[idx] = agent;
-        saveJsonStore();
-      }
-    }
-  },
-
-  removeAgent(id: string): void {
-    if (useSqlite) {
-      sqlite.exec('DELETE FROM agents WHERE id = ?', id);
-      sqlite.exec('DELETE FROM events WHERE agentId = ?', id);
-    } else {
-      jsonAgents = jsonAgents.filter(a => a.id !== id);
-      jsonEvents = jsonEvents.filter(e => e.agentId !== id);
-      saveJsonStore();
-    }
-  },
-
-  getEvents(after?: number): AgentEvent[] {
-    if (useSqlite) {
-      const rows = after !== undefined
-        ? sqlite.exec('SELECT * FROM events WHERE id > ? ORDER BY id ASC', after)
-        : sqlite.exec('SELECT * FROM events ORDER BY id ASC');
-      return (rows || []).map((r: any) => ({
-        id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
-        from: r.from, text: r.text, data: r.data ? JSON.parse(r.data) : undefined,
-      }));
-    }
-    return after !== undefined
-      ? jsonEvents.filter(e => e.id > after)
-      : [...jsonEvents];
-  },
-
-  getAgentEvents(agentId: string, after?: number): AgentEvent[] {
-    if (useSqlite) {
-      const rows = after !== undefined
-        ? sqlite.exec('SELECT * FROM events WHERE agentId = ? AND id > ? ORDER BY id ASC', agentId, after)
-        : sqlite.exec('SELECT * FROM events WHERE agentId = ? ORDER BY id ASC', agentId);
-      return (rows || []).map((r: any) => ({
-        id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
-        from: r.from, text: r.text, data: r.data ? JSON.parse(r.data) : undefined,
-      }));
-    }
-    return (after !== undefined
-      ? jsonEvents.filter(e => e.agentId === agentId && e.id > after)
-      : jsonEvents.filter(e => e.agentId === agentId)
-    );
-  },
-
-  appendEvent(event: Omit<AgentEvent, 'id' | 'ts' | 'agentId'>, agentId: string): AgentEvent {
-    const id = this.getNextEventId();
-    const full: AgentEvent = {
-      ...event,
-      id,
-      ts: Date.now(),
-      agentId,
-    };
-
-    if (useSqlite) {
-      sqlite.exec(`
-        INSERT INTO events (agentId, type, ts, from, text, data)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `, agentId, event.type, full.ts, event.from ?? null, event.text ?? null, event.data ? JSON.stringify(event.data) : null);
-    } else {
-      jsonEvents.push(full);
-      saveJsonStore();
-    }
-
-    return full;
-  },
-
-  getNextEventId(): number {
-    if (useSqlite) {
-      const row = sqlite.exec('SELECT MAX(id) as max_id FROM events');
-      return (row?.[0]?.max_id || 0) + 1;
-    }
-    return jsonNextEventId++;
-  },
-};
+export const store: IStore = (process.env.AGENTIX_STORE !== 'json' && openSqlite()) || openJson();

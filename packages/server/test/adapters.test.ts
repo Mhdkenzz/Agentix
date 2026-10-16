@@ -1,0 +1,143 @@
+// Real adapters driven through the session manager, against fake CLIs on PATH.
+import { WORK, fakeCalls, fakeCwds, waitFor } from './helpers.ts';
+import test from 'node:test';
+import { realpathSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { EventBus } from '../src/bus.ts';
+import { SessionManager } from '../src/sessions.ts';
+import { getAllAdapters } from '../src/adapters/index.ts';
+import type { AgentEvent } from '../../shared/src/types.ts';
+
+const sm = new SessionManager(new EventBus());
+const settled = (id: string) => waitFor(() => !sm.isRunning(id) && sm.getAgent(id)!.status !== 'thinking', 8000, `${id} to finish`);
+const events = (id: string, type?: string) => sm.getAgentEvents(id).filter(e => !type || e.type === type);
+const texts = (es: AgentEvent[]) => es.map(e => e.text);
+
+test('detect() reports installed CLIs with their --version', async () => {
+  const found = Object.fromEntries(await Promise.all(getAllAdapters().map(async a => [a.kind, await a.detect()])));
+  assert.deepEqual(found.codex, { installed: true, version: 'codex 9.9.9-fake' });
+  assert.deepEqual(found.opencode, { installed: true, version: 'opencode 9.9.9-fake' });
+  assert.equal(found.mock.installed, true);
+});
+
+test('codex: streams output and tools, saves thread id, steer resumes it', async () => {
+  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'create hello.txt' });
+  await settled(a.id);
+
+  assert.equal(sm.getAgent(a.id)!.status, 'idle');
+  assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'th-fake-1');
+  assert.deepEqual(texts(events(a.id, 'output')), ['Done.']);
+  assert.deepEqual(texts(events(a.id, 'tool')), ['$ bash -lc ls', 'files: add /w/hello.txt']);
+  assert.deepEqual(fakeCalls('codex')[0], ['exec', '--json', '--skip-git-repo-check', '-s', 'workspace-write', '-C', WORK, '--', 'create hello.txt']);
+  assert.equal(fakeCwds('codex')[0], `${realpathSync(WORK)} ${WORK}`, 'cwd and $PWD are the agent cwd');
+
+  await sm.steerAgent(a.id, 'now add a test');
+  await settled(a.id);
+  assert.deepEqual(fakeCalls('codex')[1], ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', '--', 'th-fake-1', 'now add a test']);
+  assert.equal(fakeCwds('codex')[1], `${realpathSync(WORK)} ${WORK}`);
+  assert.equal(events(a.id, 'output').length, 2);
+});
+
+test('opencode: streams, saves sessionID, steer passes -s', async () => {
+  const a = sm.createAgent('opencode', { cwd: WORK, prompt: 'say ok' });
+  await settled(a.id);
+  assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'ses_fake1');
+  assert.deepEqual(texts(events(a.id, 'output')), ['ok']);
+  assert.deepEqual(texts(events(a.id, 'tool')), ['shell: echo hi > x.txt']);
+  assert.deepEqual(fakeCalls('opencode')[0], ['run', '--standalone', '--format', 'json', '--auto', 'say ok']);
+
+  await sm.steerAgent(a.id, '-v looks like a flag');
+  await settled(a.id);
+  assert.deepEqual(fakeCalls('opencode')[1], ['run', '--standalone', '--format', 'json', '--auto', '-s', 'ses_fake1', '--', '-v looks like a flag']);
+});
+
+test('claude: streams, saves session_id, steer passes --resume', async () => {
+  const a = sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
+  await settled(a.id);
+  assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'cl-fake-1');
+  assert.deepEqual(texts(events(a.id, 'output')), ['All done']);
+  assert.deepEqual(texts(events(a.id, 'tool')), ['Bash: ls']);
+  await sm.steerAgent(a.id, 'again');
+  await settled(a.id);
+  assert.ok(fakeCalls('claude')[1].join(' ').includes('--resume cl-fake-1 -- again'));
+});
+
+test('status goes thinking -> working -> idle with no duplicate status events', async () => {
+  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
+  await settled(a.id);
+  const statuses = events(a.id, 'status').map(e => (e.data as any).status);
+  assert.equal(statuses[0], 'thinking');
+  assert.ok(statuses.includes('working'));
+  assert.equal(statuses.at(-1), 'idle');
+  const pairs = events(a.id, 'status').map(e => JSON.stringify(e.data));
+  for (let i = 1; i < pairs.length; i++) assert.notEqual(pairs[i], pairs[i - 1], 'consecutive duplicate status');
+});
+
+test('a failing CLI ends in error status with its stderr', async () => {
+  process.env.FAKE_FAIL = '1';
+  try {
+    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
+    await settled(a.id);
+    assert.equal(sm.getAgent(a.id)!.status, 'error');
+    assert.match(texts(events(a.id, 'error')).join('\n'), /exited with 3: boom: model unavailable/);
+  } finally {
+    delete process.env.FAKE_FAIL;
+  }
+});
+
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+test('interrupt kills a hanging CLI with SIGINT', async () => {
+  process.env.FAKE_HANG = '1';
+  try {
+    const before = fakeCalls('codex').length;
+    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'hang' });
+    await waitFor(() => fakeCalls('codex').length > before, 5000, 'codex to start');
+    const t0 = Date.now();
+    await sm.interruptAgent(a.id);
+    assert.ok(Date.now() - t0 < 1500, 'SIGINT should be enough');
+    assert.equal(sm.getAgent(a.id)!.status, 'stopped');
+    assert.equal(sm.isRunning(a.id), false);
+  } finally {
+    delete process.env.FAKE_HANG;
+  }
+});
+
+test('interrupt falls back to SIGTERM when SIGINT is ignored, and kills child processes', async () => {
+  process.env.FAKE_HANG = '1';
+  process.env.FAKE_IGNORE_INT = '1';
+  try {
+    const before = fakeCalls('codex').length;
+    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'stubborn' });
+    await waitFor(() => fakeCalls('codex').length > before, 5000, 'codex to start');
+    await new Promise(r => setTimeout(r, 100)); // let it reach `sleep`
+    const { execFileSync } = await import('node:child_process');
+    const sleeps = () => execFileSync('pgrep', ['-f', '^sleep 30$'], { encoding: 'utf-8' }).trim().split('\n').filter(Boolean).map(Number);
+    const pids = sleeps();
+    assert.ok(pids.length > 0);
+    await sm.interruptAgent(a.id);
+    assert.equal(sm.getAgent(a.id)!.status, 'stopped');
+    await waitFor(() => pids.every(p => !alive(p)), 3000, 'grandchild sleep to die');
+  } finally {
+    delete process.env.FAKE_HANG;
+    delete process.env.FAKE_IGNORE_INT;
+  }
+});
+
+test('steering a busy CLI agent kills the old turn before resuming', async () => {
+  process.env.FAKE_HANG = '1';
+  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'long task' });
+  const before = fakeCalls('codex').length;
+  await waitFor(() => sm.getAgent(a.id)!.nativeSessionId, 5000, 'session id');
+  delete process.env.FAKE_HANG;
+  await sm.steerAgent(a.id, 'change of plan');
+  await settled(a.id);
+  const calls = fakeCalls('codex').slice(before - 1);
+  assert.deepEqual(calls.at(-1)!.slice(-2), ['th-fake-1', 'change of plan']);
+  assert.equal(sm.getAgent(a.id)!.status, 'idle');
+  const types = events(a.id).map(e => e.type === 'status' ? (e.data as any).status : e.type);
+  const steerAt = types.indexOf('steer');
+  assert.deepEqual(types.slice(steerAt, steerAt + 3), ['steer', 'stopped', 'thinking']);
+});

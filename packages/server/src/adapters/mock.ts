@@ -1,6 +1,5 @@
 // Agentix — mock adapter (no external dependencies)
-import type { AgentEvent } from '../../shared/src/types.ts';
-import type { AgentAdapter, AdapterContext } from './types';
+import type { AgentAdapter } from './types.ts';
 
 const TOOL_NAMES = [
   'reading README.md', 'editing src/app.ts', 'running npm test',
@@ -9,6 +8,22 @@ const TOOL_NAMES = [
   'debugging issue', 'deploying to staging', 'checking logs',
 ];
 
+// Base delay per step; tests set this low.
+const STEP_MS = Number(process.env.AGENTIX_MOCK_STEP_MS) || 500;
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
 export const mockAdapter: AgentAdapter = {
   kind: 'mock',
 
@@ -16,30 +31,20 @@ export const mockAdapter: AgentAdapter = {
     return { installed: true, version: 'mock' };
   },
 
-  async send(ctx: AdapterContext, prompt: string) {
-    // Update status to thinking
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'thinking', data: { status: 'thinking', activity: 'thinking...' } });
-
-    // Simulate a believable sequence over ~5 seconds
+  // A believable sequence over ~5 seconds; stops as soon as the turn is aborted.
+  async send(ctx, prompt) {
     const totalSteps = 8;
     for (let i = 0; i < totalSteps; i++) {
-      await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 300));
+      await sleep(STEP_MS + Math.random() * STEP_MS * 0.6, ctx.signal);
+      if (ctx.signal.aborted) return;
 
       if (i < totalSteps - 1) {
-        // Emit tool events
         const tool = TOOL_NAMES[i % TOOL_NAMES.length];
-        ctx.emit({ agentId: ctx.agent.id, type: 'tool', text: tool, data: { tool, progress: `${i + 1}/${totalSteps}` } });
-        ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'working', data: { status: 'working', activity: tool } });
+        ctx.emit({ type: 'tool', text: tool, data: { tool, progress: `${i + 1}/${totalSteps}` } });
+        ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
       } else {
-        // Last step: emit output and go idle
-        const output = `Done: ${prompt}\n\nStep ${i + 1}/${totalSteps} completed. Mock agent finished successfully.`;
-        ctx.emit({ agentId: ctx.agent.id, type: 'output', text: output });
-        ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'idle', data: { status: 'idle', activity: 'idle' } });
+        ctx.emit({ type: 'output', text: `Done: ${prompt}\n\nStep ${i + 1}/${totalSteps} completed. Mock agent finished successfully.` });
       }
     }
-  },
-
-  async interrupt(ctx: AdapterContext) {
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'stopped', data: { status: 'stopped', activity: 'interrupted' } });
   },
 };

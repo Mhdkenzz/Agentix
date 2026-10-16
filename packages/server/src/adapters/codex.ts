@@ -1,87 +1,85 @@
 // Agentix — Codex CLI adapter
-// Flags verified with `codex exec --help` before use.
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
-import type { AgentEvent } from '../../shared/src/types.ts';
-import type { AgentAdapter, AdapterContext } from './types';
+// Verified against codex-cli 0.162.1 (`codex exec --help`, `codex exec resume --help`):
+//   new:    codex exec --json --skip-git-repo-check -s workspace-write -C <cwd> -- <prompt>
+//   resume: codex exec resume --json --skip-git-repo-check -c sandbox_mode="workspace-write" -- <id> <prompt>
+//           (resume has no -s/-C, so the sandbox goes through -c and the cwd is the process cwd)
+// JSONL events: thread.started{thread_id}, turn.started, item.started/item.completed{item},
+//   turn.completed{usage}, turn.failed{error}, error{message}
+import type { AgentAdapter, AdapterContext } from './types.ts';
+import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
 
-const execFileAsync = promisify(execFile);
+const SANDBOX = process.env.AGENTIX_CODEX_SANDBOX || 'workspace-write';
 
-function parseCodexLine(line: string): { type: string; data: unknown } | null {
-  try {
-    const parsed = JSON.parse(line);
-    if (parsed.type) return parsed;
-  } catch { /* not JSON */ }
-  return null;
+export function codexArgs(cwd: string, prompt: string, sessionId?: string): string[] {
+  return sessionId
+    ? ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', `sandbox_mode="${SANDBOX}"`, '--', sessionId, prompt]
+    : ['exec', '--json', '--skip-git-repo-check', '-s', SANDBOX, '-C', cwd, '--', prompt];
+}
+
+export function handleCodexEvent(ctx: AdapterContext, ev: any): void {
+  switch (ev.type) {
+    case 'thread.started':
+      if (ev.thread_id) ctx.setNativeSessionId(String(ev.thread_id));
+      return;
+    case 'item.started':
+    case 'item.completed': {
+      const item = ev.item ?? {};
+      const done = ev.type === 'item.completed';
+      switch (item.type) {
+        case 'agent_message':
+          if (done && item.text) ctx.emit({ type: 'output', text: String(item.text), data: item });
+          return;
+        case 'reasoning':
+          ctx.emit({ type: 'status', text: 'thinking', data: { status: 'thinking', activity: oneLine(item.text || 'thinking…') } });
+          return;
+        case 'command_execution':
+          if (!done) {
+            const tool = `$ ${oneLine(item.command)}`;
+            ctx.emit({ type: 'tool', text: tool, data: item });
+            ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
+          }
+          return;
+        case 'file_change':
+          if (done) {
+            const files = (item.changes ?? []).map((c: any) => `${c.kind ?? 'edit'} ${c.path}`).join(', ');
+            const tool = `files: ${oneLine(files)}`;
+            ctx.emit({ type: 'tool', text: tool, data: item });
+            ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
+          }
+          return;
+        case 'mcp_tool_call':
+        case 'web_search':
+          if (!done) {
+            const tool = item.type === 'web_search' ? `search: ${oneLine(item.query)}` : `mcp: ${item.server ?? ''}.${item.tool ?? ''}`;
+            ctx.emit({ type: 'tool', text: tool, data: item });
+            ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: tool } });
+          }
+          return;
+        case 'error':
+          if (done) ctx.emit({ type: 'error', text: String(item.message ?? 'codex error'), data: item });
+          return;
+      }
+      return;
+    }
+    case 'turn.failed':
+      ctx.emit({ type: 'error', text: String(ev.error?.message ?? 'turn failed'), data: ev });
+      return;
+    case 'error':
+      ctx.emit({ type: 'error', text: String(ev.message ?? 'codex error'), data: ev });
+      return;
+  }
 }
 
 export const codexAdapter: AgentAdapter = {
   kind: 'codex',
 
-  async detect() {
-    try {
-      const { stdout } = await execFileAsync('which', ['codex']);
-      return { installed: true, version: 'unknown' };
-    } catch {
-      return { installed: false };
-    }
-  },
+  detect: () => detectCli('codex'),
 
-  async send(ctx: AdapterContext, prompt: string) {
-    // Determine command based on whether we have a native session
-    const args: string[] = [];
-    const env = { ...process.env, CWD: ctx.agent.cwd };
-
-    if (ctx.agent.nativeSessionId) {
-      args.push('exec', 'resume', ctx.agent.nativeSessionId, prompt);
-    } else {
-      args.push('exec', '--json', prompt);
-    }
-
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'working', data: { status: 'working', activity: `running codex ${args.join(' ')}` } });
-
-    const child = execFileAsync('codex', args, {
-      cwd: ctx.agent.cwd,
-      maxBuffer: 10 * 1024 * 1024,
-      env,
+  async send(ctx, prompt) {
+    await runCli(ctx, 'codex', codexArgs(ctx.agent.cwd, prompt, ctx.agent.nativeSessionId), line => {
+      const ev = parseJson(line);
+      if (ev) handleCodexEvent(ctx, ev);
+      else ctx.emit({ type: 'output', text: line });
     });
-
-    child.stdout?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        const parsed = parseCodexLine(line);
-        if (parsed) {
-          if (parsed.type === 'init' || parsed.type === 'system') {
-            // Extract session id if available
-            const sid = (parsed.data as any)?.sessionId || (parsed.data as any)?.id;
-            if (sid && !ctx.agent.nativeSessionId) {
-              ctx.setNativeSessionId(String(sid));
-            }
-          } else if (parsed.type === 'item' || parsed.type === 'message' || parsed.type === 'output') {
-            ctx.emit({ agentId: ctx.agent.id, type: 'output', text: String((parsed.data as any)?.content ?? line) });
-          } else if (parsed.type === 'tool' || parsed.type === 'command' || parsed.type === 'patch') {
-            ctx.emit({ agentId: ctx.agent.id, type: 'tool', text: String((parsed.data as any)?.name ?? (parsed.data as any)?.action ?? line) });
-          }
-        } else {
-          ctx.emit({ agentId: ctx.agent.id, type: 'output', text: line });
-        }
-      }
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      ctx.emit({ agentId: ctx.agent.id, type: 'error', text: data.toString().trim() });
-    });
-
-    await child;
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'idle', data: { status: 'idle', activity: 'idle' } });
-  },
-
-  async interrupt(ctx: AdapterContext) {
-    // Codex doesn't have a direct interrupt API via CLI,
-    // but we can signal the process from the session manager.
-    // For now, emit a stop event.
-    ctx.emit({ agentId: ctx.agent.id, type: 'status', text: 'stopped', data: { status: 'stopped', activity: 'interrupted' } });
   },
 };

@@ -1,207 +1,161 @@
 // Agentix — HTTP server with REST + SSE routes
 import { createServer } from 'node:http';
-import type { Server } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { parseArgs } from 'node:util';
+import type { Server, IncomingMessage, ServerResponse } from 'node:http';
+import type { AgentEvent } from '../../shared/src/types.ts';
 import { store } from './store.ts';
 import { EventBus } from './bus.ts';
-import { SessionManager } from './sessions.ts';
-import type { Agent, AgentEvent } from '../shared/src/types.ts';
+import { SessionManager, HttpError } from './sessions.ts';
+import { getAllAdapters } from './adapters/index.ts';
 
-const PORT = 4317;
-const HOST = '127.0.0.1';
+export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
+export const HOST = '127.0.0.1';
+const SSE_DEFAULT_REPLAY = 100;
 
-const bus = new EventBus();
-const sm = new SessionManager(bus);
-
-// JSON parse helper
-function parseBody(req: any): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk: string) => { body += chunk; });
-    req.on('end', () => {
-      try { resolve(body); } catch (e) { reject(e); }
-    });
-    req.on('error', reject);
-  });
+async function readJson(req: IncomingMessage): Promise<any> {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 1_000_000) throw new HttpError(413, 'Body too large');
+  }
+  if (!body.trim()) return {};
+  try { return JSON.parse(body); } catch { throw new HttpError(400, 'Invalid JSON body'); }
 }
 
-function jsonParse(body: string): any {
-  try { return JSON.parse(body); } catch { return {}; }
-}
-
-function sendJson(res: any, status: number, data: any) {
+function sendJson(res: ServerResponse, status: number, data: unknown) {
   const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-  });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
 }
 
-function sendSSE(res: any, event: string, data: any, id?: number) {
-  const line = `id: ${id ?? ''}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  res.write(line);
+function writeSSE(res: ServerResponse, e: AgentEvent) {
+  res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
 }
 
-function serveSSE(req: any, res: any, agentId?: string) {
+/**
+ * Replay history, then stream live events. Resume point: the Last-Event-ID
+ * header or ?after=N; without one, the last ?tail=N (default 100) events.
+ */
+function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: EventBus, agentId?: string) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
+  res.write(': connected\n\n');
 
-  // Handle Last-Event-ID for reconnection
-  const lastId = req.headers['last-event-id'];
-  const after = lastId ? parseInt(lastId, 10) : 0;
+  const resume = req.headers['last-event-id'] ?? url.searchParams.get('after');
+  const after = resume != null ? Number(resume) || 0 : 0;
+  const limit = resume != null ? -1 : Number(url.searchParams.get('tail') ?? SSE_DEFAULT_REPLAY);
+  const history = agentId ? store.getAgentEvents(agentId, after, limit) : store.getEvents(after, limit);
+  for (const e of history) writeSSE(res, e);
 
-  if (agentId) {
-    const events = store.getAgentEvents(agentId, after);
-    for (const e of events) {
-      sendSSE(res, e.type, e, e.id);
-    }
-  } else {
-    const events = store.getEvents(after);
-    for (const e of events) {
-      sendSSE(res, e.type, e, e.id);
-    }
-  }
-
-  const unsubscribe = bus.subscribe((event: AgentEvent) => {
-    if (agentId) {
-      if (event.agentId === agentId) {
-        sendSSE(res, event.type, event, event.id);
-      }
-    } else {
-      sendSSE(res, event.type, event, event.id);
-    }
+  // No await between replay and subscribe, so no event can slip through the gap.
+  const unsubscribe = bus.subscribe(e => {
+    if (!agentId || e.agentId === agentId) writeSSE(res, e);
   });
-
-  req.on('close', unsubscribe);
-
-  // Keep alive
-  const interval = setInterval(() => {
-    if (!res.writableEnded) {
-      res.write(': keepalive\n\n');
-    } else {
-      clearInterval(interval);
-    }
-  }, 15000);
-
-  req.on('close', () => { clearInterval(interval); });
+  const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15000);
+  req.on('close', () => { unsubscribe(); clearInterval(keepalive); });
 }
 
-export function createAgentixServer(): { server: Server; sessionManager: SessionManager } {
+export function createAgentixServer(): { server: Server; sessionManager: SessionManager; bus: EventBus } {
+  const bus = new EventBus();
+  const sm = new SessionManager(bus);
+
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url!, `http://${req.headers.host}`);
-    const path = url.pathname;
+    const url = new URL(req.url!, `http://${req.headers.host ?? HOST}`);
+    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent); // ['api','agents',id,action]
     const method = req.method;
 
-    // CORS for local dev
+    // CORS for the Vite dev server (Step 2)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
-
-    if (method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+    if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     try {
-      // Routes
-      if (path === '/api/adapters' && method === 'GET') {
-        const { getAllAdapters } = await import('./adapters/index.ts');
-        const adapters = await Promise.all(getAllAdapters().map(async (a) => {
-          const det = await a.detect();
-          return { kind: a.kind, ...det };
-        }));
-        sendJson(res, 200, { adapters });
-        return;
+      if (parts[0] !== 'api') {
+        if (url.pathname === '/') {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('Agentix server is running. The web dashboard (Step 2) is not built yet; see /api/agents.\n');
+          return;
+        }
+        throw new HttpError(404, 'Not found');
       }
 
-      if (path === '/api/agents' && method === 'GET') {
-        sendJson(res, 200, { agents: sm.getAgents() });
-        return;
+      const [, resource, id, action] = parts;
+
+      if (resource === 'adapters' && !id && method === 'GET') {
+        const adapters = await Promise.all(getAllAdapters().map(async a => ({ kind: a.kind, ...(await a.detect()) })));
+        return sendJson(res, 200, { adapters });
       }
 
-      if (path === '/api/agents' && method === 'POST') {
-        const body = jsonParse(await parseBody(req));
-        const agent = sm.createAgent(body.kind, {
-          name: body.name,
-          role: body.role,
-          avatarId: body.avatarId,
-          cwd: body.cwd,
-          prompt: body.prompt,
-        });
-        sendJson(res, 201, { agent });
-        return;
+      if (resource === 'stream' && !id && method === 'GET') return serveSSE(req, res, url, bus);
+
+      if (resource === 'agents' && !id) {
+        if (method === 'GET') return sendJson(res, 200, { agents: sm.getAgents() });
+        if (method === 'POST') {
+          const b = await readJson(req);
+          const agent = sm.createAgent(b.kind, {
+            name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace,
+          });
+          return sendJson(res, 201, { agent });
+        }
       }
 
-      if (path.match(/^\/api\/agents\/[^/]+$/) && method === 'PATCH') {
-        const id = path.split('/')[3];
-        const agent = sm.getAgent(id);
-        if (!agent) { sendJson(res, 404, { error: 'Agent not found' }); return; }
-        const body = jsonParse(await parseBody(req));
-        if (body.name) agent.name = body.name;
-        if (body.avatarId !== undefined) agent.avatarId = body.avatarId;
-        if (body.role) agent.role = body.role;
-        if (body.cwd) agent.cwd = body.cwd;
-        store.updateAgent(agent);
-        sendJson(res, 200, { agent });
-        return;
+      if (resource === 'agents' && id && !action) {
+        if (method === 'GET') {
+          const agent = sm.getAgent(id);
+          if (!agent) throw new HttpError(404, `Agent ${id} not found`);
+          return sendJson(res, 200, { agent });
+        }
+        if (method === 'PATCH') return sendJson(res, 200, { agent: sm.updateAgent(id, await readJson(req)) });
+        if (method === 'DELETE') { await sm.removeAgent(id); return sendJson(res, 200, { ok: true }); }
       }
 
-      if (path.match(/^\/api\/agents\/[^/]+$/) && method === 'DELETE') {
-        const id = path.split('/')[3];
-        sm.removeAgent(id);
-        sendJson(res, 200, { ok: true });
-        return;
+      if (resource === 'agents' && id && action) {
+        if (action === 'steer' && method === 'POST') {
+          const b = await readJson(req);
+          return sendJson(res, 200, { event: await sm.steerAgent(id, b.text, b.from) });
+        }
+        if (action === 'interrupt' && method === 'POST') {
+          await sm.interruptAgent(id);
+          return sendJson(res, 200, { ok: true });
+        }
+        if (action === 'events' && method === 'GET') {
+          if (!sm.getAgent(id)) throw new HttpError(404, `Agent ${id} not found`);
+          const after = Number(url.searchParams.get('after')) || 0;
+          return sendJson(res, 200, { events: sm.getAgentEvents(id, after) });
+        }
+        if (action === 'stream' && method === 'GET') return serveSSE(req, res, url, bus, id);
       }
 
-      if (path.match(/^\/api\/agents\/[^/]+\/steer$/) && method === 'POST') {
-        const id = path.split('/')[3];
-        const body = jsonParse(await parseBody(req));
-        const event = await sm.steerAgent(id, body.text, body.from);
-        sendJson(res, 200, { event });
-        return;
-      }
-
-      if (path.match(/^\/api\/agents\/[^/]+\/interrupt$/) && method === 'POST') {
-        const id = path.split('/')[3];
-        await sm.interruptAgent(id);
-        sendJson(res, 200, { ok: true });
-        return;
-      }
-
-      if (path.match(/^\/api\/agents\/[^/]+\/events$/) && method === 'GET') {
-        const id = path.split('/')[3];
-        const after = url.searchParams.get('after');
-        const events = sm.getAgentEvents(id, after ? parseInt(after, 10) : undefined);
-        sendJson(res, 200, { events });
-        return;
-      }
-
-      if (path === '/api/stream' && method === 'GET') {
-        serveSSE(req, res);
-        return;
-      }
-
-      if (path.match(/^\/api\/agents\/[^/]+\/stream$/) && method === 'GET') {
-        const id = path.split('/')[3];
-        serveSSE(req, res, id);
-        return;
-      }
-
-      // Default: 404
-      sendJson(res, 404, { error: 'Not found', path });
+      throw new HttpError(404, 'Not found');
     } catch (err: any) {
-      sendJson(res, 500, { error: err.message });
+      if (res.headersSent) { res.end(); return; }
+      const status = err instanceof HttpError ? err.status : 500;
+      sendJson(res, status, { error: err?.message ?? String(err), ...(err?.data ? { data: err.data } : {}) });
     }
   });
 
-  return { server, sessionManager: sm };
+  return { server, sessionManager: sm, bus };
+}
+
+/** Start listening; resolves once bound, rejects with a readable error (e.g. port in use). */
+export function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sessionManager: SessionManager; port: number }> {
+  const { server, sessionManager } = createAgentixServer();
+  return new Promise((resolve, reject) => {
+    server.once('error', (err: any) => {
+      reject(err.code === 'EADDRINUSE'
+        ? new Error(`port ${port} is already in use (another agentix server?). Set AGENTIX_PORT to use a different one.`)
+        : err);
+    });
+    server.listen(port, HOST, () => {
+      // Agents that were mid-turn when the server last stopped can't still be running.
+      // (Only after binding, so a second server that fails to start can't touch the live one's agents.)
+      store.resetBusyAgents();
+      const addr = server.address();
+      resolve({ server, sessionManager, port: typeof addr === 'object' && addr ? addr.port : port });
+    });
+  });
 }
