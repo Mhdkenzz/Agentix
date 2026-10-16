@@ -4,11 +4,13 @@ import { useStore } from '../store.ts';
 
 const ICON: Record<string, string> = {
   output: '💬', tool: '🛠', thinking: '💭', status: '•', steer: '🧭', message: '✉️', error: '⚠️',
-  'agent.created': '✨', 'agent.updated': '✎', 'agent.removed': '🗑',
+  'agent.created': '✨', 'agent.updated': '✎', 'agent.removed': '🗑', session: '↺',
 };
 
 export function EventLine({ e, showAgent = false }: { e: AgentEvent; showAgent?: boolean }) {
-  const agents = useStore(s => s.agents);
+  const live = useStore(s => s.agents);
+  const archived = useStore(s => s.archived);
+  const agents = { ...archived, ...live };
   const who = e.from === 'user' ? 'you' : e.from === 'system' ? 'agentix' : e.from ? (agents[e.from]?.name ?? e.from) : '';
   const time = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const text = e.type === 'status' ? ((e.data as any)?.activity ?? e.text) : e.text;

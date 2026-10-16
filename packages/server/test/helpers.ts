@@ -17,6 +17,9 @@ process.env.AGENTIX_MOCK_STEP_MS = '20';
 process.env.AGENTIX_UPDATE_DELAY_MS = '100';
 process.env.AGENTIX_KILL_GRACE_MS = '300';
 process.env.PATH = `${BIN}:${process.env.PATH}`;
+// Prompts reach the fakes unchanged unless a test turns the [SHARED CONTEXT] block back on.
+mkdirSync(process.env.AGENTIX_HOME, { recursive: true });
+writeFileSync(join(process.env.AGENTIX_HOME, 'settings.json'), JSON.stringify({ sharedContext: false }));
 
 // A tiny fake dashboard build for the static-file tests.
 export const WEB = join(TMP, 'web') + '/';

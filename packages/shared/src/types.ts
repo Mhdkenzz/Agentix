@@ -15,6 +15,8 @@ export interface Agent {
   activity: string;
   nativeSessionId?: string;
   createdAt: number;
+  /** set when the agent was removed; its record and history are kept */
+  archivedAt?: number;
 }
 
 export type EventType =
@@ -25,6 +27,7 @@ export type EventType =
   | 'status'
   | 'steer'
   | 'message'
+  | 'session'   // new native session started; data.clear = true also hides earlier events in the UI
   | 'error';
 
 export interface AgentEvent {

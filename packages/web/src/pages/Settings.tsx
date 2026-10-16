@@ -1,5 +1,6 @@
 // Server settings (coordinator mode, defaults, CLI paths) and this browser's voice preferences.
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, type AdapterInfo, type CoordinatorMode, type ServerSettings } from '../api.ts';
 import { useStore } from '../store.ts';
 import { loadSettings, saveSettings } from '../settings.ts';
@@ -14,6 +15,7 @@ const MODES: { id: CoordinatorMode; title: string; text: string }[] = [
 export function Settings() {
   const server = useStore(s => s.server);
   const setServerSettings = useStore(s => s.setServerSettings);
+  const navigate = useNavigate();
   const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
   const [paths, setPaths] = useState<Record<string, string>>({});
   const [local, setLocal] = useState(loadSettings);
@@ -76,7 +78,10 @@ export function Settings() {
 
       <section className="card">
         <h2>Agent CLIs</h2>
-        <p className="muted small">Agentix runs each CLI by name from your PATH. Set a full path if it lives somewhere else.</p>
+        <div className="row">
+          <p className="muted small grow">Agentix runs each CLI by name from your PATH. Set a full path if it lives somewhere else.</p>
+          <button className="btn small" onClick={() => navigate('/setup')}>Run setup again</button>
+        </div>
         <table className="table">
           <thead><tr><th>Agent</th><th>Found</th><th>CLI path</th></tr></thead>
           <tbody>

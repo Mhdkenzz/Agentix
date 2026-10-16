@@ -2,6 +2,10 @@
 
 ## REST API
 
+The server listens on 127.0.0.1 only and answers only requests for this machine: a `Host` other than
+`localhost`, `127.0.0.1` or `[::1]` gets `403` (blocks DNS rebinding), and so does an `/api` request whose
+`Origin` is another site. No CORS headers are sent, so other web pages can't call the API.
+
 All routes are relative to `http://127.0.0.1:4317` (`AGENTIX_PORT` changes the port).
 
 ### GET `/api/adapters`
@@ -82,7 +86,14 @@ One agent. `404` if unknown.
 
 ### DELETE `/api/agents/:id`
 
-Stop and remove an agent.
+Stop and remove an agent. Its record and every event are kept: it gets `archivedAt`, leaves
+`GET /api/agents`, and stays in `GET /api/agents?archived=1`, `/api/events` and `/api/agents/:id/events`.
+
+### POST `/api/agents/:id/session`
+
+`{ "clear": false }`: interrupt the agent and drop its native session, so the next message starts a new
+conversation (the coordinator and CEO get their role instructions again). Emits a `session` event; with
+`clear: true` dashboards hide the events before it (they stay in the history). CLI: `agentix new <id> [--clear]`.
 
 ### POST `/api/agents/:id/steer`
 
@@ -98,7 +109,25 @@ Stop the current turn (status becomes `stopped`). No-op when idle.
 
 ### GET `/api/agents/:id/events?after=N`
 
-Get event history for an agent. `after` filters to events with id > N.
+Get event history for an agent (removed ones too). `after` filters to events with id > N.
+
+### Shared context
+
+- `GET /api/context`: `{ brief, notes, contextPaths, sharedContext, dir }`
+- `PUT /api/context/brief` `{ text }`: the team brief (`$AGENTIX_HOME/context/brief.md`)
+- `POST /api/context/notes` `{ text }` / `DELETE /api/context/notes/:id`: notes (`context/notes.jsonl`)
+- `GET /api/context/search?q=...&limit=10`: BM25 keyword search over notes, agent outputs and the text
+  files under `contextPaths`. Hits: `{ source: note|output|file, title, text, score, ... }`
+
+Before every worker and coordinator turn (when `sharedContext` is on), the prompt starts with a
+`[SHARED CONTEXT]` block: the brief, the 5 best hits for the task (never the agent's own output) and how to
+add a note. Any agent can save a note with a line `@@remember :: <fact>`.
+
+### GET `/api/setup/scan`
+
+Runs `packages/server/scripts/scan_clis.py` (Python 3, standard library only; a PATH-only Node scan if there
+is no Python) and returns `{ scanner, platform, found: [{ kind, name, path, version, runs, on_path, all_paths, supported }] }`.
+The dashboard's `/setup` page uses it on first launch (`setupDone` false and no agents).
 
 ### GET `/api/events`
 
@@ -108,7 +137,8 @@ Response: `{ events, stats }`, where `stats` is `[{ agentId, count, lastTs }]` f
 
 ### GET / PUT `/api/settings`
 
-`{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "" }`.
+`{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "",
+"sharedContext": true, "contextPaths": ["/abs/docs"], "setupDone": false }`.
 PUT takes any subset. `coordinatorMode`: `human` (no coordinator updates, its @@ commands are ignored),
 `agent` (the dashboard routes kenz's worker instructions through the coordinator), `both` (default).
 Stored in `$AGENTIX_HOME/settings.json`.
@@ -127,9 +157,10 @@ Lines in a coordinator's output (the server runs them; see `server/src/commands.
 @@steer <agent id or name> :: <instructions>
 @@stop <agent id or name>
 @@tell ceo :: <report>
+@@remember :: <fact for the shared context>
 ```
 
-The CEO may only write `@@tell coordinator :: <message>`. Every CEO turn starts with a `[TEAM STATUS]` digest.
+The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`. Every CEO turn starts with a `[TEAM STATUS]` digest.
 
 ### GET `/api/stream`
 
@@ -157,7 +188,14 @@ it), otherwise the last `?tail=N` events (default 100).
 | `status` | Status/activity change |
 | `steer` | Human/agent sent instructions |
 | `message` | Message to an agent, e.g. `[AGENTIX UPDATE]` from `system` to the coordinator |
+| `session` | New native session; `data.clear` true means dashboards hide earlier events |
 | `error` | Error occurred |
+
+## History on disk
+
+Besides the database (`$AGENTIX_HOME/agentix.db`), everything is appended to plain JSON Lines files that
+are never rewritten: `$AGENTIX_HOME/history/agents.jsonl` (one line each time an agent is created, changed,
+gets a session or is removed) and `$AGENTIX_HOME/history/<agentId>.jsonl` (every event of that agent).
 
 ## Dashboard
 

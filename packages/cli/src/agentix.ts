@@ -235,7 +235,9 @@ const HELP = `\x1b[1mAgentix\x1b[0m — AI agent orchestration
     agentix logs <id> [-f]                  Show (or follow) an agent's events
     agentix steer <id> "<text>"             Interrupt if busy, then continue the session with <text>
     agentix stop <id>                       Stop the current turn
-    agentix rm <id>                         Stop and remove an agent
+    agentix new <id> [--clear]              Start the agent on a fresh session (--clear also hides old messages)
+    agentix rm <id>                         Stop and remove an agent (its history is kept)
+    agentix remember "<fact>"               Add a note to the team's shared context
     agentix watch                           Live feed of all agents
 `;
 
@@ -261,6 +263,20 @@ async function main() {
       const id = await needId(args, 'agentix stop <id>');
       await api(`/api/agents/${id}/interrupt`, 'POST');
       console.log(`${color(args[0])}✓ Stopped ${args[0]}${RESET}`);
+      return;
+    }
+    case 'new': {
+      const id = await needId(args, 'agentix new <id> [--clear]');
+      const clear = args.includes('--clear');
+      await api(`/api/agents/${id}/session`, 'POST', { clear });
+      console.log(`${color(args[0])}✓ ${clear ? 'Cleared' : 'New session for'} ${args[0]}${RESET}`);
+      return;
+    }
+    case 'remember': {
+      const text = args.join(' ').trim();
+      if (!text) throw new CliError('usage: agentix remember "<fact>"');
+      await api('/api/context/notes', 'POST', { text });
+      console.log('✓ Saved to shared context');
       return;
     }
     case 'rm': {

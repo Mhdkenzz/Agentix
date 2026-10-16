@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { api, connectStream } from './api.ts';
 import { useStore } from './store.ts';
 import { TopBar } from './components/TopBar.tsx';
@@ -9,11 +9,26 @@ import { Agents } from './pages/Agents.tsx';
 import { History } from './pages/History.tsx';
 import { Settings } from './pages/Settings.tsx';
 import { Ceo } from './pages/Ceo.tsx';
+import { Context } from './pages/Context.tsx';
+import { Setup } from './pages/Setup.tsx';
 
 export function App() {
   const showNewAgent = useStore(s => s.showNewAgent);
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
-  const onOffice = useLocation().pathname === '/';
+  const { pathname } = useLocation();
+  const onOffice = pathname === '/';
+  const navigate = useNavigate();
+  const server = useStore(s => s.server);
+  const agentCount = useStore(s => Object.keys(s.agents).length);
+  const connected = useStore(s => s.connected);
+
+  // First launch: no agents and setup never finished -> the setup wizard (once per page load).
+  const offered = useRef(false);
+  useEffect(() => {
+    if (offered.current || !server || !connected) return;
+    offered.current = true;
+    if (!server.setupDone && agentCount === 0 && pathname !== '/setup') navigate('/setup');
+  }, [server, connected, agentCount, pathname, navigate]);
 
   useEffect(() => {
     const { setAgents, applyEvent, setConnected } = useStore.getState();
@@ -47,6 +62,8 @@ export function App() {
           <Route path="/agents" element={<Agents />} />
           <Route path="/history" element={<History />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/context" element={<Context />} />
+          <Route path="/setup" element={<Setup />} />
         </Routes>
       </main>
       {showNewAgent && <NewAgentModal onClose={() => setShowNewAgent(false)} />}

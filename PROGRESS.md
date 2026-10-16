@@ -150,7 +150,6 @@ mounts a throwaway one first.
   real `pi` 0.73.1 through a CLI path override.
 
 ### Not done / next ideas
-- Removing an agent still deletes its history (History only shows agents that exist).
 - Hermes has no live tool events; switching it to `hermes-acp` would add them.
 - Pi and Hermes still need one real turn each on kenz's machine (no API keys here).
 - Voice needs a real try in Chrome.
@@ -162,3 +161,18 @@ mounts a throwaway one first.
   right panel shows the CEO's current turn live (thinking, tools, replies).
 - Redesign: black and minimal. Violet (`--think`) is the thinking color and the main accent (New agent, nav hover,
   focus); green working, amber waiting, red error, cyan tools and messages. The 3D office matches.
+
+## Shared context, sessions, permanent history, setup (2026-10-16)
+- Security: the API only answers this machine (Host and Origin checks, no `Access-Control-Allow-Origin: *`),
+  so a web page in the browser can no longer create or steer agents.
+- Permanent history: removing an agent archives it. History lists removed agents (tagged "removed"), and every
+  agent change and event is also appended to `~/.agentix/history/*.jsonl`.
+- New session and Clear for any agent (CEO page header, a coordinator card on the CEO page, the agent panel,
+  `agentix new <id> [--clear]`).
+- Shared context (RAG): team brief, notes (`@@remember :: fact` from any agent, or the Context page), BM25 search
+  over notes, agent outputs and chosen folders. Workers and the coordinator get the best matches before each task.
+- First-run setup at `/setup`: scans the machine with `scan_clis.py`, asks who coordinates (you / an agent /
+  you + agent), creates the coordinator (and optionally a CEO), and hands it the team's first task so it spawns
+  the workers. "Run setup again" in Settings.
+- Checked: 52 server tests; the whole setup flow in headless Chromium with fake CLIs (coordinator spawned two
+  workers and saved a note; Clear, Context search and a removed agent in History all worked, no page errors).

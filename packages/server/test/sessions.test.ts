@@ -88,12 +88,14 @@ test('coordinator gets a batched [AGENTIX UPDATE] turn for steers and finished w
   sm.updateAgent(coord.id, { role: 'worker' });
 });
 
-test('stop on an idle agent is a no-op; remove deletes agent and history', async () => {
+test('stop on an idle agent is a no-op; remove takes the agent out but keeps its record and history', async () => {
   const a = sm.createAgent('mock', { prompt: 'p' });
   await idle(a.id);
   await sm.interruptAgent(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   await sm.removeAgent(a.id);
   assert.equal(sm.getAgent(a.id), undefined);
+  assert.ok(sm.getAgent(a.id, true)?.archivedAt);
+  assert.ok(sm.getAgentEvents(a.id).some(e => e.type === 'output'));
   await assert.rejects(sm.steerAgent(a.id, 'x'), (e: any) => e.status === 404);
 });

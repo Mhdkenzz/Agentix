@@ -2,7 +2,8 @@
 // The CEO only talks to the coordinator, but each of its turns includes the whole team's status.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.ts';
-import { useStore } from '../store.ts';
+import { useStore, sinceClear } from '../store.ts';
+import { SessionButtons } from '../components/SessionButtons.tsx';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { canListen, canSpeak, listen, speak, stopSpeaking } from '../voice.ts';
 import { loadSettings, saveSettings } from '../settings.ts';
@@ -41,8 +42,11 @@ export function Ceo() {
     if (!ceo) return [];
     const out: Line[] = [];
     const add = (e: AgentEvent, who: Line['who'], text: string, note?: string) => out.push({ id: e.id, who, text, ts: e.ts, note });
-    for (const e of events[ceo.id] ?? []) {
-      if (e.type === 'steer' && e.from === 'user') add(e, 'you', e.text ?? '');
+    const mine = sinceClear(events[ceo.id]);
+    const since = mine[0]?.type === 'session' ? mine[0].id : 0; // after a Clear, only what came later
+    for (const e of mine) {
+      if (e.type === 'session') add(e, 'system', e.text ?? '');
+      else if (e.type === 'steer' && e.from === 'user') add(e, 'you', e.text ?? '');
       else if (e.type === 'output' && e.text) { const t = spoken(e.text); if (t) add(e, 'ceo', t); }
       else if (e.type === 'message' && e.from === coordinator?.id) add(e, 'coordinator', e.text ?? '', 'reported to the CEO');
       else if (e.type === 'message' && e.from === 'system') add(e, 'system', e.text ?? '');
@@ -50,7 +54,7 @@ export function Ceo() {
     }
     if (coordinator) {
       for (const e of events[coordinator.id] ?? []) {
-        if (e.type === 'message' && e.from === ceo.id) add(e, 'ceo', e.text ?? '', `told ${coordinator.name}`);
+        if (e.id > since && e.type === 'message' && e.from === ceo.id) add(e, 'ceo', e.text ?? '', `told ${coordinator.name}`);
       }
     }
     return out.sort((a, b) => a.id - b.id);
@@ -121,6 +125,7 @@ export function Ceo() {
             <div className="panel-title">{ceo.name} <span className="muted">· CEO · {ceo.kind}</span></div>
             <div className="muted small">{busy ? 'thinking…' : 'listening'} · talks only to {coordinator ? coordinator.name : 'the coordinator (none yet)'}</div>
           </div>
+          <SessionButtons agent={ceo} onError={setError} />
           <label className="check"><input type="checkbox" checked={settings.voice} onChange={toggleVoice} disabled={!canSpeak} /> speak replies</label>
         </header>
         <div className="chat" ref={logRef}>
@@ -146,7 +151,8 @@ export function Ceo() {
           : 'Voice input needs Chrome or Edge. Typing works everywhere.'}</div>
       </section>
       <aside className="ceo-side">
-        <ThinkingPanel ceo={ceo} events={events[ceo.id] ?? []} busy={busy} />
+        <ThinkingPanel ceo={ceo} events={sinceClear(events[ceo.id])} busy={busy} />
+        {coordinator && <CoordinatorCard coordinator={coordinator} onError={setError} />}
         <TeamSidebar agents={Object.values(agents)} />
       </aside>
     </div>
@@ -158,7 +164,7 @@ function ThinkingPanel({ ceo, events, busy }: { ceo: Agent; events: AgentEvent[]
   const ref = useRef<HTMLDivElement>(null);
   const turn = useMemo(() => {
     let start = -1;
-    events.forEach((e, i) => { if (e.type === 'steer' || (e.type === 'message' && e.from !== ceo.id)) start = i; });
+    events.forEach((e, i) => { if (e.type === 'steer' || e.type === 'session' || (e.type === 'message' && e.from !== ceo.id)) start = i; });
     return events.slice(start + 1).filter(e => ['thinking', 'tool', 'output', 'error'].includes(e.type));
   }, [events, ceo.id]);
   useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [turn.length]);
@@ -175,6 +181,20 @@ function ThinkingPanel({ ceo, events, busy }: { ceo: Agent; events: AgentEvent[]
         ))}
         {busy && turn.length > 0 && <div className="muted small">{ceo.activity}</div>}
       </div>
+    </section>
+  );
+}
+
+/** The coordinator's session controls, so both leads can be reset from one place. */
+function CoordinatorCard({ coordinator, onError }: { coordinator: Agent; onError(msg: string): void }) {
+  return (
+    <section className="lead-card">
+      <AvatarThumb id={coordinator.avatarId} size={30} />
+      <div className="grow">
+        <div><b>{coordinator.name}</b> <span className="muted small">coordinator</span></div>
+        <div className="muted small"><span className={`st st-${coordinator.status}`}>{coordinator.status}</span> · {coordinator.kind}</div>
+      </div>
+      <div className="lead-actions"><SessionButtons agent={coordinator} onError={onError} /></div>
     </section>
   );
 }

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import type { Agent, AgentEvent, Status } from '../../shared/src/types.ts';
+import { withHistory } from './history.ts';
 
 /** Data directory: $AGENTIX_HOME, else ~/.agentix. Tests point this at a temp dir. */
 export const AGENTIX_HOME = process.env.AGENTIX_HOME || join(homedir(), '.agentix');
@@ -15,12 +16,19 @@ type NewEvent = Omit<AgentEvent, 'id' | 'ts' | 'agentId'>;
 
 export interface IStore {
   getStoreType(): 'sqlite' | 'json';
+  /** live agents (not removed) */
   getAgents(): Agent[];
-  getAgent(id: string): Agent | undefined;
+  /** every agent ever created, removed ones included (they have archivedAt) */
+  getAllAgents(): Agent[];
+  /** a live agent; with includeArchived, a removed one too */
+  getAgent(id: string, includeArchived?: boolean): Agent | undefined;
   createAgent(agent: Agent): void;
   updateAgent(agent: Agent): void;
   setStatus(id: string, status: Status, activity: string): void;
   setNativeSessionId(id: string, sessionId: string): void;
+  /** mark an agent removed but keep its record and every event */
+  archiveAgent(id: string): void;
+  /** delete an agent and its events for good (only for leftover mock agents) */
   removeAgent(id: string): void;
   /** all events after `after`; with `limit`, only the latest `limit` of those */
   getEvents(after?: number, limit?: number): AgentEvent[];
@@ -69,7 +77,8 @@ function openSqlite(): IStore | null {
       status TEXT NOT NULL,
       activity TEXT NOT NULL,
       nativeSessionId TEXT,
-      createdAt INTEGER NOT NULL
+      createdAt INTEGER NOT NULL,
+      archivedAt INTEGER
     );
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,11 +92,17 @@ function openSqlite(): IStore | null {
     CREATE INDEX IF NOT EXISTS events_agent ON events(agentId, id);
   `);
 
+  // Databases from before agents were archived instead of deleted.
+  if (!db.prepare('PRAGMA table_info(agents)').all().some((c: any) => c.name === 'archivedAt')) {
+    db.exec('ALTER TABLE agents ADD COLUMN archivedAt INTEGER');
+  }
+
   const toAgent = (r: any): Agent => ({
     id: r.id, name: r.name, kind: r.kind, role: r.role, avatarId: r.avatarId,
     cwd: r.cwd, status: r.status, activity: r.activity,
     ...(r.nativeSessionId ? { nativeSessionId: r.nativeSessionId } : {}),
     createdAt: r.createdAt,
+    ...(r.archivedAt != null ? { archivedAt: r.archivedAt } : {}),
   });
   const toEvent = (r: any): AgentEvent => ({
     id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
@@ -97,8 +112,10 @@ function openSqlite(): IStore | null {
   });
 
   const q = {
-    agents: db.prepare('SELECT * FROM agents ORDER BY createdAt ASC'),
+    agents: db.prepare('SELECT * FROM agents WHERE archivedAt IS NULL ORDER BY createdAt ASC'),
+    allAgents: db.prepare('SELECT * FROM agents ORDER BY createdAt ASC'),
     agent: db.prepare('SELECT * FROM agents WHERE id = ?'),
+    archive: db.prepare(`UPDATE agents SET archivedAt=?, status='stopped', activity='removed' WHERE id=?`),
     insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=? WHERE id=?`),
@@ -110,7 +127,7 @@ function openSqlite(): IStore | null {
     agentEvents: db.prepare('SELECT * FROM (SELECT * FROM events WHERE agentId = ? AND id > ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC'),
     insertEvent: db.prepare('INSERT INTO events (agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?)'),
     insertEventWithId: db.prepare('INSERT INTO events (id, agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)'),
-    resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE status IN (${BUSY.map(() => '?').join(',')})`),
+    resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE archivedAt IS NULL AND status IN (${BUSY.map(() => '?').join(',')})`),
     countAgents: db.prepare('SELECT COUNT(*) AS n FROM agents'),
     stats: db.prepare('SELECT agentId, COUNT(*) AS n, MAX(ts) AS lastTs FROM events GROUP BY agentId'),
   };
@@ -118,7 +135,11 @@ function openSqlite(): IStore | null {
   const s: IStore = {
     getStoreType: () => 'sqlite',
     getAgents: () => q.agents.all().map(toAgent),
-    getAgent: id => { const r = q.agent.get(id); return r ? toAgent(r) : undefined; },
+    getAllAgents: () => q.allAgents.all().map(toAgent),
+    getAgent: (id, includeArchived) => {
+      const r = q.agent.get(id);
+      return r && (includeArchived || r.archivedAt == null) ? toAgent(r) : undefined;
+    },
     createAgent: a => {
       q.insertAgent.run(a.id, a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.createdAt);
     },
@@ -127,6 +148,7 @@ function openSqlite(): IStore | null {
     },
     setStatus: (id, status, activity) => { q.setStatus.run(status, activity, id); },
     setNativeSessionId: (id, sid) => { q.setSession.run(sid, id); },
+    archiveAgent: id => { q.archive.run(Date.now(), id); },
     removeAgent: id => { q.deleteAgent.run(id); q.deleteEvents.run(id); },
     getEvents: (after = 0, limit = -1) => q.events.all(after, limit).map(toEvent),
     getAgentEvents: (agentId, after = 0, limit = -1) => q.agentEvents.all(agentId, after, limit).map(toEvent),
@@ -200,12 +222,17 @@ function openJson(): IStore {
 
   return {
     getStoreType: () => 'json',
-    getAgents: () => agents.map(a => ({ ...a })),
-    getAgent: id => { const a = agents.find(x => x.id === id); return a ? { ...a } : undefined; },
+    getAgents: () => agents.filter(a => !a.archivedAt).map(a => ({ ...a })),
+    getAllAgents: () => agents.map(a => ({ ...a })),
+    getAgent: (id, includeArchived) => {
+      const a = agents.find(x => x.id === id);
+      return a && (includeArchived || !a.archivedAt) ? { ...a } : undefined;
+    },
     createAgent: a => { agents.push({ ...a }); save(); },
     updateAgent: a => patch(a.id, { ...a }),
     setStatus: (id, status, activity) => patch(id, { status, activity }),
     setNativeSessionId: (id, nativeSessionId) => patch(id, { nativeSessionId }),
+    archiveAgent: id => patch(id, { archivedAt: Date.now(), status: 'stopped', activity: 'removed' }),
     removeAgent: id => {
       agents = agents.filter(a => a.id !== id);
       events = events.filter(e => e.agentId !== id);
@@ -243,11 +270,11 @@ function openJson(): IStore {
     },
     resetBusyAgents: () => {
       let n = 0;
-      for (const a of agents) if (BUSY.includes(a.status)) { a.status = 'idle'; a.activity = 'idle (server restarted)'; n++; }
+      for (const a of agents) if (!a.archivedAt && BUSY.includes(a.status)) { a.status = 'idle'; a.activity = 'idle (server restarted)'; n++; }
       if (n) save();
       return n;
     },
   };
 }
 
-export const store: IStore = (process.env.AGENTIX_STORE !== 'json' && openSqlite()) || openJson();
+export const store: IStore = withHistory((process.env.AGENTIX_STORE !== 'json' && openSqlite()) || openJson(), AGENTIX_HOME);

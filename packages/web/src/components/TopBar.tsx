@@ -22,7 +22,7 @@ export function CoordinatorModeSelect() {
   );
 }
 
-const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/history', 'History'], ['/settings', 'Settings']] as const;
+const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/context', 'Context'], ['/history', 'History'], ['/settings', 'Settings']] as const;
 
 export function TopBar() {
   const agents = useStore(s => s.agents);

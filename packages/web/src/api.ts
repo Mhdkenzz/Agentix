@@ -36,7 +36,16 @@ export interface ServerSettings {
   cliPaths: Record<string, string>;
   defaultKind: string;
   defaultCwd: string;
+  sharedContext: boolean;
+  contextPaths: string[];
+  setupDone: boolean;
 }
+
+export interface Note { id: string; ts: number; from: string; text: string }
+export interface ContextHit { source: 'note' | 'output' | 'file'; title: string; text: string; score: number; ts?: number; agentId?: string; path?: string }
+export interface ContextInfo { brief: string; notes: Note[]; contextPaths: string[]; sharedContext: boolean; dir: string }
+export interface FoundCli { kind: string; name: string; path: string; version: string; runs: boolean; on_path: boolean; all_paths: string[]; supported: boolean }
+export interface ScanResult { scanner: 'python' | 'node'; platform: string; found: FoundCli[] }
 
 export const api = {
   settings: () => call<{ settings: ServerSettings }>('/api/settings').then(r => r.settings),
@@ -49,13 +58,23 @@ export const api = {
   update: (id: string, patch: Partial<Agent> & { replace?: boolean }) =>
     call<{ agent: Agent }>(`/api/agents/${id}`, 'PATCH', patch).then(r => r.agent),
   remove: (id: string) => call(`/api/agents/${id}`, 'DELETE'),
+  /** live and removed agents (removed ones have archivedAt) */
+  allAgents: () => call<{ agents: Agent[]; historyDir: string }>('/api/agents?archived=1'),
+  /** fresh native session; clear also hides earlier events in the dashboard */
+  newSession: (id: string, clear: boolean) => call(`/api/agents/${id}/session`, 'POST', { clear }),
+  context: () => call<ContextInfo>('/api/context'),
+  saveBrief: (text: string) => call<{ brief: string }>('/api/context/brief', 'PUT', { text }).then(r => r.brief),
+  addNote: (text: string) => call<{ note: Note | null }>('/api/context/notes', 'POST', { text }).then(r => r.note),
+  deleteNote: (id: string) => call(`/api/context/notes/${encodeURIComponent(id)}`, 'DELETE'),
+  searchContext: (q: string) => call<{ hits: ContextHit[] }>(`/api/context/search?q=${encodeURIComponent(q)}&limit=20`).then(r => r.hits),
+  scan: () => call<ScanResult>('/api/setup/scan'),
   steer: (id: string, text: string) => call(`/api/agents/${id}/steer`, 'POST', { text, from: 'user' }),
   interrupt: (id: string) => call(`/api/agents/${id}/interrupt`, 'POST'),
   events: (id: string, after = 0) =>
     call<{ events: AgentEvent[] }>(`/api/agents/${id}/events?after=${after}`).then(r => r.events),
 };
 
-const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'thinking', 'status', 'steer', 'message', 'error'];
+const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output', 'tool', 'thinking', 'status', 'steer', 'message', 'session', 'error'];
 
 /**
  * One EventSource for everything. The browser reconnects on its own and sends

@@ -10,6 +10,8 @@ export interface Arc { id: number; from: string; to: string; born: number }
 
 interface State {
   agents: Record<string, Agent>;
+  /** removed agents, whose history is kept (loaded by the History page) */
+  archived: Record<string, Agent>;
   events: Record<string, AgentEvent[]>;
   lastEventId: number;
   connected: boolean;
@@ -19,6 +21,7 @@ interface State {
   server?: ServerSettings;
   setServerSettings(s: ServerSettings): void;
   setAgents(list: Agent[]): void;
+  setArchived(list: Agent[]): void;
   applyEvent(e: AgentEvent): void;
   setHistory(agentId: string, list: AgentEvent[]): void;
   setConnected(c: boolean): void;
@@ -29,6 +32,7 @@ interface State {
 
 export const useStore = create<State>((set, get) => ({
   agents: {},
+  archived: {},
   events: {},
   lastEventId: 0,
   connected: false,
@@ -39,11 +43,15 @@ export const useStore = create<State>((set, get) => ({
   setAgents(list) {
     set({ agents: Object.fromEntries(list.map(a => [a.id, a])) });
   },
+  setArchived(list) {
+    set({ archived: Object.fromEntries(list.filter(a => a.archivedAt).map(a => [a.id, a])) });
+  },
 
   applyEvent(e) {
     const s = get();
     if (e.id && e.id <= s.lastEventId && s.events[e.agentId]?.some(x => x.id === e.id)) return; // replay duplicate
     const agents = { ...s.agents };
+    let archived = s.archived;
     const current = agents[e.agentId];
     switch (e.type) {
       case 'agent.created':
@@ -51,6 +59,7 @@ export const useStore = create<State>((set, get) => ({
         if (e.data && typeof e.data === 'object') agents[e.agentId] = { ...current, ...(e.data as Agent) };
         break;
       case 'agent.removed':
+        if (current) archived = { ...archived, [e.agentId]: { ...current, archivedAt: e.ts, status: 'stopped', activity: 'removed' } };
         delete agents[e.agentId];
         break;
       case 'status': {
@@ -70,7 +79,7 @@ export const useStore = create<State>((set, get) => ({
       arcs = arcs.concat({ id: e.id, from, to: e.agentId, born: performance.now() });
     }
     set({
-      agents, events, arcs,
+      agents, archived, events, arcs,
       lastEventId: Math.max(s.lastEventId, e.id || 0),
       selectedId: e.type === 'agent.removed' && s.selectedId === e.agentId ? undefined : s.selectedId,
     });
@@ -94,3 +103,13 @@ export const useStore = create<State>((set, get) => ({
 }));
 
 export const ARC_DURATION_MS = ARC_MS;
+
+/** Events since the agent's last "Clear" (a session event with data.clear), the marker included. */
+export function sinceClear(list: AgentEvent[] | undefined): AgentEvent[] {
+  if (!list) return [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.type === 'session' && (e.data as { clear?: boolean } | undefined)?.clear) return list.slice(i);
+  }
+  return list;
+}

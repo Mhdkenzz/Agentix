@@ -10,6 +10,7 @@ import { store, AGENTIX_HOME } from './store.ts';
 import { EventBus } from './bus.ts';
 import { getSettings } from './settings.ts';
 import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command } from './commands.ts';
+import { addNote, sharedContextBlock } from './context.ts';
 
 const ROLES: Role[] = ['ceo', 'coordinator', 'worker'];
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
@@ -92,7 +93,9 @@ export class SessionManager {
   // ---------- agents ----------
 
   getAgents(): Agent[] { return store.getAgents(); }
-  getAgent(id: string): Agent | undefined { return store.getAgent(id); }
+  /** every agent ever created, removed ones (archivedAt set) included */
+  getAllAgents(): Agent[] { return store.getAllAgents(); }
+  getAgent(id: string, includeArchived = false): Agent | undefined { return store.getAgent(id, includeArchived); }
   getAgentEvents(id: string, after?: number, limit?: number): AgentEvent[] { return store.getAgentEvents(id, after, limit); }
   isRunning(id: string): boolean { return this.running.has(id); }
 
@@ -132,7 +135,8 @@ export class SessionManager {
     if (!isAbsolute(cwd)) throw new HttpError(400, 'cwd must be an absolute path');
     mkdirSync(cwd, { recursive: true });
 
-    const id = 'a_' + randomUUID().slice(0, 6);
+    let id = 'a_' + randomUUID().slice(0, 6);
+    while (store.getAgent(id, true)) id = 'a_' + randomUUID().slice(0, 6); // removed agents keep their ids
     this.claimRole(role, id, opts.replace);
 
     const agent: Agent = {
@@ -179,13 +183,31 @@ export class SessionManager {
     return agent;
   }
 
+  /** Take an agent out of the office. Its record and full history stay (in the database and history files). */
   async removeAgent(id: string): Promise<void> {
     const agent = this.requireAgent(id);
     await this.interruptAgent(id);
-    store.removeAgent(id);
+    store.archiveAgent(id);
     this.inbox.delete(id);
     this.briefed.delete(id);
-    this.emit(id, { type: 'agent.removed', text: `Agent ${agent.name} removed` });
+    this.emit(id, { type: 'agent.removed', text: `Agent ${agent.name} removed (history kept)` });
+  }
+
+  /**
+   * Start the agent on a fresh native session: the next message begins a new conversation with no memory
+   * of the old one (role instructions are sent again). With `clear`, dashboards also hide the earlier events;
+   * they stay in the history.
+   */
+  async newSession(id: string, clear = false): Promise<AgentEvent> {
+    this.requireAgent(id);
+    await this.interruptAgent(id);
+    const agent = this.requireAgent(id); // re-read: interrupting changed its status
+    delete agent.nativeSessionId;
+    store.updateAgent(agent);
+    this.inbox.delete(id);
+    this.briefed.delete(id);
+    this.setStatus(id, 'idle', clear ? 'idle (cleared)' : 'idle (new session)');
+    return this.emit(id, { type: 'session', from: 'user', text: clear ? 'Session cleared' : 'New session started', data: { clear } });
   }
 
   // ---------- turns ----------
@@ -212,6 +234,11 @@ export class SessionManager {
       instructions = agent.role === 'coordinator' ? COORDINATOR_INSTRUCTIONS : CEO_INSTRUCTIONS;
     }
     if (agent.role !== 'worker') this.briefed.set(agentId, agent.role);
+    // Workers and the coordinator see the team brief, shared notes and related findings of other agents.
+    if (agent.role !== 'ceo') {
+      const shared = sharedContextBlock(agent, prompt);
+      if (shared) prompt = `${shared}\n\n${prompt}`;
+    }
     // The CEO always sees what the whole team is doing.
     if (agent.role === 'ceo') {
       const label = from === 'user' ? '[FROM KENZ]' : '';
@@ -230,11 +257,12 @@ export class SessionManager {
           this.setStatus(agentId, status, d.activity ?? e.text ?? status);
         } else {
           this.emit(agentId, e);
-          if (e.type === 'output' && e.text && agent.role !== 'worker') this.runCommands(agentId, e.text);
+          if (e.type === 'output' && e.text) this.runCommands(agentId, e.text);
         }
       },
       setNativeSessionId: (sid: string) => {
-        if (agent.nativeSessionId === sid) return;
+        if (signal.aborted || agent.nativeSessionId === sid) return; // e.g. a turn stopped by "new session"
+
         agent.nativeSessionId = sid;
         store.setNativeSessionId(agentId, sid);
       },
@@ -386,11 +414,19 @@ export class SessionManager {
       ?? (['coordinator', 'ceo'].includes(t.toLowerCase()) ? agents.find(a => a.role === t.toLowerCase()) : undefined);
   }
 
-  /** Run the @@ commands in a coordinator's or CEO's output. */
+  /** Run the @@ commands in an agent's output: @@remember from anyone, the rest from the coordinator or CEO. */
   private runCommands(sourceId: string, text: string): void {
     const source = store.getAgent(sourceId);
-    if (!source || source.role === 'worker') return;
-    const { commands, errors } = parseCommands(text);
+    if (!source) return;
+    const parsed = parseCommands(text);
+    for (const c of parsed.commands) {
+      if (c.op !== 'remember') continue;
+      const note = addNote(c.text, source.id);
+      if (note) this.emit(sourceId, { type: 'message', from: 'system', text: `Saved to shared context: ${oneLine(c.text, 200)}`, data: { note } });
+    }
+    if (source.role === 'worker') return;
+    const commands = parsed.commands.filter(c => c.op !== 'remember');
+    const errors = parsed.errors;
     const fail = (msg: string) => this.emit(sourceId, { type: 'error', from: 'system', text: msg });
     for (const e of errors) fail(e);
     if (!commands.length) return;
@@ -422,6 +458,7 @@ export class SessionManager {
     }
 
     switch (c.op) {
+      case 'remember': return; // handled in runCommands
       case 'spawn': {
         const o = c.opts;
         const role = (o.role as Role | undefined) ?? 'worker';
