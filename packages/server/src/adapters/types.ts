@@ -9,7 +9,7 @@ export interface AdapterContext {
   setNativeSessionId(id: string): void;
   /** aborted when the turn is interrupted or steered; the adapter must stop promptly */
   signal: AbortSignal;
-  /** role instructions (coordinator/CEO) to give before the prompt; set once per session */
+  /** role instructions and AGENTS.md guidance to give before the prompt; set once per session */
   instructions?: string;
   /** extra environment variables for the CLI process */
   env?: Record<string, string>;
