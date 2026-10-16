@@ -92,6 +92,8 @@ export class SessionManager {
   private updateTimer: NodeJS.Timeout | undefined;
   /** One outstanding CEO request per CEO; follow-ups never interrupt a coordinator turn. */
   private pendingCeoRequests = new Map<string, PendingCeoRequest>();
+  /** when each agent's last turn ended, so the CEO watchdog only counts time the coordinator was idle */
+  private lastTurnEnd = new Map<string, number>();
   /** messages waiting for an agent to finish its current turn (CEO <- coordinator) */
   private inbox = new Map<string, string[]>();
   /** role whose instructions each agent has already been given in its current session */
@@ -323,12 +325,16 @@ export class SessionManager {
     if (fields.owner && !owner) throw new HttpError(400, `no agent called "${fields.owner}"`);
     const task = this.taskCall(() => createTask({ ...fields, owner, by: from }));
     this.emitTask(task, from, 'New task');
-    if (from === 'user') this.queueUpdate(`kenz added task ${task.id}: ${task.title}`);
+    if (from === 'user') {
+      this.queueUpdate(`kenz added task ${task.id}: ${task.title}`);
+      this.startAssignedTask(task, from);
+    }
     return task;
   }
 
   editTask(id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }, from = 'user'): Task {
-    if (!getTask(id)) throw new HttpError(404, `no task ${id}`);
+    const before = getTask(id);
+    if (!before) throw new HttpError(404, `no task ${id}`);
     let owner = patch.owner;
     if (owner) {
       const a = this.resolve(owner);
@@ -338,6 +344,8 @@ export class SessionManager {
     const task = this.taskCall(() => updateTask(id, { ...patch, owner }));
     this.emitTask(task, from, 'Task');
     if (from === 'user') this.queueUpdate(`kenz changed task ${task.id} to ${task.status}: ${task.title}`);
+    // A to-do task handed to a (different) worker starts it, from the board or from the coordinator.
+    if (task.owner && task.owner !== before.owner) this.startAssignedTask(task, from);
     return task;
   }
 
@@ -521,6 +529,7 @@ export class SessionManager {
   }
 
   private onTurnEnd(agentId: string, aborted: boolean, failure?: string): void {
+    this.lastTurnEnd.set(agentId, Date.now());
     const agent = store.getAgent(agentId);
     if (!agent) return;
     const waiting = this.inbox.get(agentId);
@@ -728,8 +737,8 @@ export class SessionManager {
     this.armCeoRequestTimer(pending);
   }
 
-  private armCeoRequestTimer(pending: PendingCeoRequest): void {
-    pending.timer = setTimeout(() => this.onCeoRequestTimeout(pending), CEO_REPLY_TIMEOUT_MS);
+  private armCeoRequestTimer(pending: PendingCeoRequest, ms = CEO_REPLY_TIMEOUT_MS): void {
+    pending.timer = setTimeout(() => this.onCeoRequestTimeout(pending), ms);
     pending.timer.unref();
   }
 
@@ -739,6 +748,12 @@ export class SessionManager {
     const coordinator = store.getAgent(pending.coordinatorId);
     if (!ceo || !coordinator || this.findRole('coordinator')?.id !== pending.coordinatorId || getSettings().coordinatorMode === 'human') {
       this.reportCeoIssue(pending, 'the coordinator is unavailable or coordinator mode is set to human');
+      return;
+    }
+    // Only idle time counts: a coordinator that is working (or just finished) hasn't ignored the request.
+    const quiet = Date.now() - (this.lastTurnEnd.get(coordinator.id) ?? 0);
+    if (this.running.has(coordinator.id) || quiet < CEO_REPLY_TIMEOUT_MS) {
+      this.armCeoRequestTimer(pending, this.running.has(coordinator.id) ? CEO_REPLY_TIMEOUT_MS : CEO_REPLY_TIMEOUT_MS - quiet);
       return;
     }
     if (pending.attempts >= CEO_REPLY_ATTEMPTS) {

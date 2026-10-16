@@ -37,13 +37,11 @@ test('a worker in a git repo gets its own branch; its task moves to review; its 
   await board.getByPlaceholder(/New task/).fill('Add a footer to app.js');
   await board.getByLabel('Owner', { exact: true }).selectOption({ label: 'Vega' });
   await board.getByRole('button', { name: 'Add task' }).click();
-  const todo = board.locator('.col-todo .task').filter({ hasText: 'Add a footer to app.js' });
-  await expect(todo).toBeVisible();
-  await expect(todo).toContainText('Vega');
 
-  // Vega works on it: the task goes to doing, then to review when the turn ends.
-  expect((await request.post(`/api/agents/${vega}/steer`, { data: { text: 'Add the footer', from: 'user' } })).ok()).toBeTruthy();
-  await expect(board.locator('.col-review .task').filter({ hasText: 'Add a footer to app.js' })).toBeVisible();
+  // The board starts Vega on it: the task goes to doing, then to review when the turn ends.
+  const done = board.locator('.col-review .task').filter({ hasText: 'Add a footer to app.js' });
+  await expect(done).toBeVisible();
+  await expect(done).toContainText('Vega');
 
   // The fake codex reports 1200 in + 300 out per turn.
   await expect(page.locator('nav.topbar .c-tokens')).toContainText('tokens today');
@@ -81,12 +79,12 @@ test('New agent: pick a model (and reasoning level) from the CLI\'s list, and ch
   await page.goto('/');
   await page.getByRole('button', { name: '+ New agent' }).click();
   const modal = page.locator('.modal');
-  await modal.getByLabel('Agent', { exact: true }).selectOption('codex');
+  await modal.getByRole('combobox', { name: /^Agent\b/ }).selectOption('codex');
   await modal.getByLabel('Name', { exact: true }).fill('Orion');
   const picker = modal.locator('.model-picker');
   const select = picker.locator('select').first();
-  // The fake codex lists two models (a hidden one is left out), plus "CLI default".
-  await expect(select.locator('option')).toHaveText(['CLI default (gpt-5.6-luna:high)', 'GPT-6.1-Sol · gpt-6.1-sol', 'GPT-6-Astra · gpt-6-astra']);
+  // The fake codex lists two models (a hidden one is left out), plus "CLI default" (which names the model from ~/.codex/config.toml when there is one).
+  await expect(select.locator('option')).toHaveText([/^CLI default\b/, 'GPT-6.1-Sol · gpt-6.1-sol', 'GPT-6-Astra · gpt-6-astra']);
   await select.selectOption('gpt-6.1-sol');
   await expect(picker).toContainText('Latest workhorse model');
   await picker.getByLabel('Reasoning level').selectOption('high');
@@ -114,7 +112,7 @@ test('sessions: active sessions can be selected, and a new session dialog opens'
   await page.getByRole('button', { name: '+ New session' }).click();
   const modal = page.locator('.session-modal');
   await expect(modal).toContainText('Start a fresh native conversation');
-  await expect(modal.getByRole('combobox', { name: 'Agent', exact: true })).toBeVisible();
+  await expect(modal.getByRole('combobox', { name: /^Agent\b/ })).toBeVisible();
   await modal.getByRole('button', { name: 'Cancel' }).click();
 
   await sessions.selectOption({ index: 1 });

@@ -71,6 +71,24 @@ test('coordinator task assignment starts an existing idle worker', async () => {
   assert.equal(sm.getAgent(worker.id)!.status, 'idle');
 });
 
+test('a task kenz assigns on the board starts the idle worker, or queues behind its turn', async () => {
+  const worker = sm.createAgent('mock', { name: 'BoardWorker' });
+  const first = sm.addTask({ title: 'board task one', owner: worker.name });
+  await waitFor(() => sm.isRunning(worker.id), 2000, 'worker started');
+  const second = sm.addTask({ title: 'board task two', owner: worker.id });
+  await waitFor(() => evs(worker.id, 'output').some(e => e.text?.includes('board task two')), 8000, 'queued task ran next');
+  assert.ok(evs(worker.id, 'output').some(e => e.text?.includes(`[TASK ${first.id}] board task one`)));
+  assert.equal(evs(worker.id, 'steer').length, 0, 'the second task did not interrupt the first');
+
+  // handing an existing to-do task to an idle worker starts it too
+  await idle(worker.id);
+  const loose = sm.addTask({ title: 'board task three' });
+  sm.editTask(loose.id, { owner: worker.name });
+  await waitFor(() => evs(worker.id, 'output').some(e => e.text?.includes('board task three')), 8000, 'reassigned task ran');
+  await idle(worker.id);
+  assert.equal(second.owner, worker.id);
+});
+
 test('CEO: sees the team digest, can only @@tell the coordinator', async () => {
   const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
   await idle(coord.id).catch(() => {});
@@ -170,4 +188,29 @@ test('settings persist and validate; cli path overrides', () => {
   assert.equal(cliPath('opencode'), 'opencode');
   assert.match(readFileSync(join(process.env.AGENTIX_HOME!, 'settings.json'), 'utf8'), /\/opt\/codex/);
   updateSettings({ cliPaths: {} });
+});
+
+test('the CEO watchdog waits while the coordinator is working, and only counts idle time', async () => {
+  const coord = sm.getAgents().find(a => a.role === 'coordinator')!; // CodexBoss, a CLI coordinator
+  const ceo = sm.getAgents().find(a => a.role === 'ceo')!;
+  await idle(coord.id).catch(() => {});
+  await idle(ceo.id).catch(() => {});
+  process.env.FAKE_HANG = '1'; // the fake codex hangs after its first line: a long coordinator turn
+  try {
+    await sm.steerAgent(coord.id, 'a long job');
+    await waitFor(() => sm.isRunning(coord.id), 2000, 'coordinator busy');
+  } finally { delete process.env.FAKE_HANG; }
+  const request = 'status of the long job please';
+  await sm.steerAgent(ceo.id, `say: @@tell coordinator :: ${request}`);
+  await waitFor(() => evs(coord.id, 'message').some(e => e.from === ceo.id && e.text === request), 3000, 'request delivered');
+  await sleep(2600); // well past two 1 s timeouts
+  assert.equal(evs(coord.id, 'message').filter(e => e.from === ceo.id && /follow-up/.test(e.text!)).length, 0, 'no follow-ups while busy');
+  assert.equal(evs(ceo.id, 'error').filter(e => /status of the long job/.test(JSON.stringify(e)) || /could not get a response/.test(e.text!)).length,
+    evs(ceo.id, 'error').filter(e => /could not get a response/.test(e.text!)).length);
+  const reportsBefore = evs(ceo.id, 'error').filter(e => /could not get a response/.test(e.text!)).length;
+
+  // once it is idle and still silent, the follow-ups and the report come
+  await sm.interruptAgent(coord.id);
+  await waitFor(() => evs(coord.id, 'message').some(e => e.from === ceo.id && /follow-up 2\/3/.test(e.text!)), 8000, 'follow-up after idle');
+  await waitFor(() => evs(ceo.id, 'error').filter(e => /could not get a response/.test(e.text!)).length > reportsBefore, 10000, 'reported');
 });
