@@ -2,10 +2,12 @@
 // Flags from `pi --help` (0.73.1):
 //   pi -p --mode json [--session <id>] [--append-system-prompt <text>] <prompt>
 // JSON lines (docs/json.md): {type:'session',id} header, tool_execution_start{toolName,args},
-//   message_end{message:{role:'assistant',content:[{type:'text',text}],stopReason,errorMessage?}}, agent_end.
+//   message_end{message:{role:'assistant',content:[{type:'text',text}],stopReason,errorMessage?,
+//   usage?:{input,output,cacheRead,cacheWrite,totalTokens,cost:{total}}}}, agent_end.
+// A turn can hold several assistant messages (one per model call); their usage is summed into one event.
 // Pi exits 0 even when the model call fails, so an assistant message with stopReason "error" fails the turn.
 import type { AgentAdapter, AdapterContext } from './types.ts';
-import { detectCliWithHelp, runCli, parseJson, oneLine } from './proc.ts';
+import { detectCliWithHelp, runCli, parseJson, oneLine, UsageTally } from './proc.ts';
 
 /** What the Pi coding agent's --help mentions; Debian's unrelated `pi` (digits of π) has none of it. */
 export const PI_HELP_SIGNATURE = /--append-system-prompt|--mode\b/;
@@ -19,7 +21,8 @@ export function piArgs(prompt: string, sessionId?: string, instructions?: string
   return args;
 }
 
-export function handlePiEvent(ctx: AdapterContext, ev: any, failures: string[]): void {
+/** `usage` adds up each assistant message's tokens; the caller emits the total once the turn ends. */
+export function handlePiEvent(ctx: AdapterContext, ev: any, failures: string[], usage?: UsageTally): void {
   switch (ev.type) {
     case 'session':
       if (ev.id && ev.id !== ctx.agent.nativeSessionId) ctx.setNativeSessionId(String(ev.id));
@@ -43,6 +46,8 @@ export function handlePiEvent(ctx: AdapterContext, ev: any, failures: string[]):
       if (m.role !== 'assistant') break;
       const text = (m.content ?? []).filter((c: any) => c.type === 'text' && c.text).map((c: any) => c.text).join('\n').trim();
       if (text) ctx.emit({ type: 'output', text });
+      const u = m.usage;
+      if (u) usage?.add({ input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total });
       if (m.stopReason === 'error') failures.push(String(m.errorMessage ?? 'pi: model call failed'));
       break;
     }
@@ -59,10 +64,15 @@ export const piAdapter: AgentAdapter = {
 
   async send(ctx, prompt) {
     const failures: string[] = [];
-    await runCli(ctx, 'pi', piArgs(prompt, ctx.agent.nativeSessionId, ctx.instructions), line => {
-      const ev = parseJson(line);
-      if (ev) handlePiEvent(ctx, ev, failures);
-    });
+    const usage = new UsageTally();
+    try {
+      await runCli(ctx, 'pi', piArgs(prompt, ctx.agent.nativeSessionId, ctx.instructions), line => {
+        const ev = parseJson(line);
+        if (ev) handlePiEvent(ctx, ev, failures, usage);
+      });
+    } finally {
+      usage.emit(ctx); // tokens spent before a failure still count
+    }
     if (failures.length && !ctx.signal.aborted) throw new Error(failures.at(-1));
   },
 };
