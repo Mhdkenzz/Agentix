@@ -274,8 +274,8 @@ kbd { background: var(--panel2); border: 1px solid var(--line2); border-bottom-w
 .usage-line { color: var(--info); }
 .usage-line .cost { color: var(--warn); }
 .branch-tag { color: var(--pink); margin-right: 5px; }
-.worktree { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 16px; border-top: 1px solid var(--line); }
-.worktree .branch { color: var(--pink); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 16px; border-top: 1px solid var(--line); }
+.worktree .branch { color: var(--pink); font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.merge:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
 .diff-modal { width: min(1000px, 100%); }
 .diff-files { margin: 8px 0; max-height: 120px; overflow-y: auto; }
