@@ -3,9 +3,10 @@
 // Flags from `claude --help`:
 //   claude -p --output-format stream-json --verbose --permission-mode acceptEdits [--resume <id>] -- <prompt>
 // stream-json lines: {type:'system',subtype:'init',session_id}, {type:'assistant',message:{content:[...]}},
-//   {type:'result',is_error,result,session_id}
+//   {type:'result',is_error,result,session_id,total_cost_usd,usage:{input_tokens,output_tokens,
+//   cache_read_input_tokens,cache_creation_input_tokens}} → one usage event per turn
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
-import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
+import { detectCli, runCli, parseJson, oneLine, emitUsage } from './proc.ts';
 
 export function claudeArgs(prompt: string, sessionId?: string): string[] {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits'];
@@ -38,9 +39,16 @@ export function handleClaudeEvent(ctx: AdapterContext, ev: any): boolean {
         if (block.thinking) ctx.emit({ type: 'thinking', text: String(block.thinking) });
       }
     }
-  } else if (ev.type === 'result' && ev.is_error) {
-    if (NOT_SIGNED_IN.test(String(ev.result ?? '').trim())) return true;
-    ctx.emit({ type: 'error', text: String(ev.result ?? 'claude error'), data: ev });
+  } else if (ev.type === 'result') {
+    const u = ev.usage ?? {};
+    emitUsage(ctx, {
+      input: u.input_tokens, output: u.output_tokens,
+      cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens, cost: ev.total_cost_usd,
+    });
+    if (ev.is_error) {
+      if (NOT_SIGNED_IN.test(String(ev.result ?? '').trim())) return true;
+      ctx.emit({ type: 'error', text: String(ev.result ?? 'claude error'), data: ev });
+    }
   }
   return false;
 }

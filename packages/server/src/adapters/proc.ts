@@ -2,6 +2,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { AdapterContext } from './types.ts';
+import type { Usage } from '../../../shared/src/types.ts';
 import { cliPath } from '../settings.ts';
 
 /** Grace period between SIGINT and SIGTERM when a turn is interrupted. */
@@ -36,6 +37,7 @@ export async function detectCliWithHelp(cmd: string, signature: RegExp, what: st
  * Spawn a CLI in the agent's cwd, call `onLine` for every stdout line, and
  * resolve when it exits. On abort: SIGINT to the process group, then SIGTERM
  * after KILL_GRACE_MS. Rejects if the process fails or exits non-zero (unless aborted).
+ * Blank stdout lines are skipped unless `keepBlankLines` (plain-text CLIs, whose paragraphs need them).
  */
 export function runCli(
   ctx: AdapterContext,
@@ -43,6 +45,7 @@ export function runCli(
   args: string[],
   onLine: (line: string) => void,
   onStderrLine?: (line: string) => void,
+  keepBlankLines = false,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (ctx.signal.aborted) return resolve();
@@ -71,7 +74,7 @@ export function runCli(
     ctx.signal.addEventListener('abort', onAbort, { once: true });
 
     createInterface({ input: child.stdout! }).on('line', line => {
-      if (!line.trim()) return;
+      if (!line.trim() && !keepBlankLines) return;
       try { onLine(line); } catch (err: any) {
         ctx.emit({ type: 'error', text: `adapter parse error: ${err?.message ?? err}` });
       }
@@ -115,4 +118,64 @@ export function parseJson(line: string): any | null {
 export function oneLine(s: unknown, max = 120): string {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+/** Drop escape sequences (colours, cursor moves) some CLIs print even when stdout isn't a terminal. */
+export function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g, '');
+}
+
+/** A token count (or cost) from CLI output: missing, negative or not a number is 0. */
+export function count(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+export interface UsageParts { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; cost?: unknown }
+
+/**
+ * Adds up one turn's token use; `emit()` sends it as a single `usage` event, or nothing when it's all zero.
+ * cacheRead, cacheWrite and cost appear only when the CLI reported them.
+ */
+export class UsageTally {
+  private input = 0;
+  private output = 0;
+  private cacheRead = 0;
+  private cacheWrite = 0;
+  private cost = 0;
+
+  add(u: UsageParts | null | undefined): this {
+    if (!u) return this;
+    this.input += count(u.input);
+    this.output += count(u.output);
+    this.cacheRead += count(u.cacheRead);
+    this.cacheWrite += count(u.cacheWrite);
+    this.cost += count(u.cost);
+    return this;
+  }
+
+  get usage(): Usage | undefined {
+    if (!this.input && !this.output && !this.cacheRead && !this.cacheWrite && !this.cost) return undefined;
+    const u: Usage = { input: this.input, output: this.output };
+    if (this.cacheRead) u.cacheRead = this.cacheRead;
+    if (this.cacheWrite) u.cacheWrite = this.cacheWrite;
+    if (this.cost) u.cost = Math.round(this.cost * 1e8) / 1e8; // sums of per-step costs drift in the last digits
+    return u;
+  }
+
+  emit(ctx: AdapterContext): void {
+    const data = this.usage;
+    if (data) ctx.emit({ type: 'usage', data });
+  }
+}
+
+/** Plain-text CLI output as one message: no escape codes, no trailing spaces, at most one blank line in a row. */
+export function plainText(lines: string[]): string {
+  return lines.map(l => stripAnsi(l).trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Emit the `usage` event of a turn the CLI reports in one piece (nothing when it's all zero). */
+export function emitUsage(ctx: AdapterContext, u: UsageParts | null | undefined): void {
+  new UsageTally().add(u).emit(ctx);
 }

@@ -5,9 +5,10 @@
 //   *that service's* directory and ignores our cwd (seen live: files landed in the wrong folder).
 // --auto approves permissions that aren't explicitly denied (no one is there to answer prompts).
 // JSON lines carry sessionID and a `part`: step_start, text{part.text}, tool_use{part.tool, part.state},
-//   step_finish{part.reason}, error{error}
+//   step_finish{part.reason, part.tokens:{input,output,reasoning,cache:{read,write}}, part.cost}, error{error}
+// Each step_finish carries that step's tokens; the turn's sum goes out as one usage event at the end.
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
-import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
+import { detectCli, runCli, parseJson, oneLine, count, UsageTally } from './proc.ts';
 
 export function opencodeArgs(prompt: string, sessionId?: string): string[] {
   const args = ['run', '--standalone', '--format', 'json', '--auto'];
@@ -18,7 +19,8 @@ export function opencodeArgs(prompt: string, sessionId?: string): string[] {
   return args;
 }
 
-export function handleOpencodeEvent(ctx: AdapterContext, ev: any): void {
+/** `usage` adds up each step's tokens; the caller emits the total once the turn ends. */
+export function handleOpencodeEvent(ctx: AdapterContext, ev: any, usage?: UsageTally): void {
   if (ev.sessionID && ev.sessionID !== ctx.agent.nativeSessionId) ctx.setNativeSessionId(String(ev.sessionID));
   const part = ev.part ?? {};
 
@@ -39,6 +41,12 @@ export function handleOpencodeEvent(ctx: AdapterContext, ev: any): void {
       if (part.state?.status === 'error') ctx.emit({ type: 'error', text: `${tool} failed: ${oneLine(part.state.error, 200)}` });
       return;
     }
+    case 'step_finish': {
+      const t = part.tokens ?? {};
+      // reasoning tokens are billed as output
+      usage?.add({ input: t.input, output: count(t.output) + count(t.reasoning), cacheRead: t.cache?.read, cacheWrite: t.cache?.write, cost: part.cost });
+      return;
+    }
     case 'error': {
       const err = ev.error ?? {};
       ctx.emit({ type: 'error', text: String(err.data?.message ?? err.message ?? err.name ?? 'opencode error'), data: ev });
@@ -53,10 +61,15 @@ export const opencodeAdapter: AgentAdapter = {
   detect: () => detectCli('opencode'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'opencode', opencodeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
-      const ev = parseJson(line);
-      if (ev) handleOpencodeEvent(ctx, ev);
-      else ctx.emit({ type: 'output', text: line });
-    });
+    const usage = new UsageTally();
+    try {
+      await runCli(ctx, 'opencode', opencodeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+        const ev = parseJson(line);
+        if (ev) handleOpencodeEvent(ctx, ev, usage);
+        else ctx.emit({ type: 'output', text: line });
+      });
+    } finally {
+      usage.emit(ctx); // tokens spent before a failure still count
+    }
   },
 };

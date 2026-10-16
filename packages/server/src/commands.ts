@@ -61,7 +61,7 @@ export const COORDINATOR_INSTRUCTIONS = `[AGENTIX] You are the COORDINATOR of a 
 kenz (the human) and the CEO agent talk to you; you direct the worker agents.
 You receive "[AGENTIX UPDATE]" messages when workers finish, fail or are steered by kenz, plus a team digest.
 To act on the team, write commands on their own lines in your reply (the server runs them):
-  @@spawn kind=<codex|opencode|claude|pi|hermes> name=<Name> avatar=random cwd=<absolute path> :: <task>
+  @@spawn kind=<codex|opencode|claude|pi|hermes|gemini|aider|goose> name=<Name> avatar=random cwd=<absolute path> :: <task>
   @@steer <agent id or name> :: <instructions>
   @@stop <agent id or name>
   @@tell ceo :: <short report for the CEO>

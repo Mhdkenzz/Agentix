@@ -6,6 +6,9 @@ import { opencodeAdapter } from './opencode.ts';
 import { claudeAdapter } from './claude.ts';
 import { piAdapter } from './pi.ts';
 import { hermesAdapter } from './hermes.ts';
+import { geminiAdapter } from './gemini.ts';
+import { aiderAdapter } from './aider.ts';
+import { gooseAdapter } from './goose.ts';
 
 const adapters: Record<string, AgentAdapter> = {
   mock: mockAdapter,
@@ -14,6 +17,9 @@ const adapters: Record<string, AgentAdapter> = {
   claude: claudeAdapter,
   pi: piAdapter,
   hermes: hermesAdapter,
+  gemini: geminiAdapter,
+  aider: aiderAdapter,
+  goose: gooseAdapter,
 };
 
 /** The mock adapter is for tests only and stays hidden unless AGENTIX_MOCK=1. */
