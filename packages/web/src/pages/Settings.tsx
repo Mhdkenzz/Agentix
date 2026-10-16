@@ -80,7 +80,7 @@ export function Settings() {
         <table className="table">
           <thead><tr><th>Agent</th><th>Found</th><th>CLI path</th></tr></thead>
           <tbody>
-            {adapters.filter(a => a.kind !== 'mock').map(a => (
+            {adapters.map(a => (
               <tr key={a.kind}>
                 <td><b>{a.kind}</b></td>
                 <td>{a.installed ? <span className="st st-working">✓ {a.version}</span> : <span className="muted">not found</span>}</td>

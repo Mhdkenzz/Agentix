@@ -15,6 +15,9 @@ Env vars: `AGENTIX_PORT` (default 4317), `AGENTIX_URL` (CLI), `AGENTIX_HOME` (de
 `AGENTIX_STORE=json` (force the JSON fallback), `AGENTIX_CODEX_SANDBOX`, `AGENTIX_UPDATE_DELAY_MS`
 (coordinator batching, default 5000).
 
+The mock agent kind is for tests only: it is hidden unless `AGENTIX_MOCK=1` (the test helpers set it).
+Without it, the server removes any leftover mock agents and their history when it starts.
+
 ## Step 1: Agent backend + CLI — done (2026-10-16)
 
 First pass by OpenCode (commit 49bb2b3); blockers fixed after review on branch `step1-fixes`.
