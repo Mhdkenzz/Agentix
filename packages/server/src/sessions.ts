@@ -42,6 +42,17 @@ export interface CreateOptions {
   replace?: boolean;
 }
 
+/** A random name nobody in the office has yet (falls back to Name-2, Name-3, ... when all are taken). */
+function pickName(): string {
+  const taken = new Set(store.getAgents().map(a => a.name));
+  const free = NAMES.filter(n => !taken.has(n));
+  if (free.length) return free[Math.floor(Math.random() * free.length)];
+  const base = NAMES[Math.floor(Math.random() * NAMES.length)];
+  let i = 2;
+  while (taken.has(`${base}-${i}`)) i++;
+  return `${base}-${i}`;
+}
+
 export class SessionManager {
   private bus: EventBus;
   private running = new Map<string, RunningTurn>();
@@ -116,7 +127,7 @@ export class SessionManager {
 
     const agent: Agent = {
       id,
-      name: opts.name || NAMES[Math.floor(Math.random() * NAMES.length)],
+      name: opts.name || pickName(),
       kind: kind as Agent['kind'],
       role,
       avatarId,

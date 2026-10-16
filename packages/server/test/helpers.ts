@@ -17,6 +17,14 @@ process.env.AGENTIX_UPDATE_DELAY_MS = '100';
 process.env.AGENTIX_KILL_GRACE_MS = '300';
 process.env.PATH = `${BIN}:${process.env.PATH}`;
 
+// A tiny fake dashboard build for the static-file tests.
+export const WEB = join(TMP, 'web') + '/';
+mkdirSync(join(WEB, 'assets'), { recursive: true });
+writeFileSync(join(WEB, 'index.html'), '<!doctype html><div id="root"></div>');
+writeFileSync(join(WEB, 'assets', 'app-123.js'), 'console.log(1)');
+writeFileSync(join(TMP, 'secret.txt'), 'nope');
+process.env.AGENTIX_WEB_DIST = WEB;
+
 // Each fake logs its argv (one line, NUL-separated) and cwd, then prints canned JSONL.
 // FAKE_HANG=1 makes it hang after the first line; FAKE_IGNORE_INT=1 makes it ignore SIGINT.
 function fake(name: string, lines: string[]) {

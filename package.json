@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "test": "node --test packages/server/test/*.test.ts",
-    "server": "node packages/cli/src/agentix.ts server"
+    "server": "node packages/cli/src/agentix.ts server",
+    "dev:web": "npm run dev -w @agentix/web",
+    "build": "npm run build -w @agentix/web"
   }
 }

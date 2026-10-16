@@ -77,6 +77,33 @@ test('/api/stream delivers named events live; Last-Event-ID resumes', async () =
   assert.equal(resumed.filter(m => m.data.agentId !== body.agent.id).length, 0);
 });
 
+test('serves the dashboard: assets, SPA fallback, no path escape', async () => {
+  const root = await fetch(base + '/');
+  assert.equal(root.status, 200);
+  assert.match(root.headers.get('content-type')!, /text\/html/);
+  assert.match(await root.text(), /id="root"/);
+  const js = await fetch(base + '/assets/app-123.js');
+  assert.match(js.headers.get('content-type')!, /javascript/);
+  assert.match(js.headers.get('cache-control')!, /immutable/);
+  assert.match(await (await fetch(base + '/history')).text(), /id="root"/, 'client routes get index.html');
+  assert.doesNotMatch(await (await fetch(base + '/..%2fsecret.txt')).text(), /nope/);
+  assert.equal((await fetch(base + '/', { method: 'POST' })).status, 405);
+});
+
+test('GET /api/agents has lastEventId for stream?after=', async () => {
+  const created = (await json('/api/agents', 'POST', { kind: 'mock' })).body.agent;
+  const { body } = await json('/api/agents');
+  const latest = (await json(`/api/agents/${created.id}/events`)).body.events.at(-1);
+  assert.ok(latest && body.lastEventId >= latest.id);
+});
+
+test('auto names are unique while names are free', async () => {
+  const names: string[] = [];
+  for (let i = 0; i < 5; i++) names.push((await json('/api/agents', 'POST', { kind: 'mock' })).body.agent.name);
+  const all = (await json('/api/agents')).body.agents.map((a: any) => a.name);
+  assert.equal(new Set(all).size, all.length);
+});
+
 test('CLI: spawn, ls and watch work against the server', async () => {
   const watch = spawn(process.execPath, [CLI, 'watch'], { env });
   let out = '';

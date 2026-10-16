@@ -39,9 +39,13 @@ List all agents.
       "nativeSessionId": "sess_abc123",
       "createdAt": 1729000000000
     }
-  ]
+  ],
+  "lastEventId": 42
 }
 ```
+
+`lastEventId` (the newest event id) comes with the list, so a client can take this snapshot and then
+open `/api/stream?after=<lastEventId>` without replaying what it already has.
 
 ### POST `/api/agents`
 
@@ -122,3 +126,8 @@ it), otherwise the last `?tail=N` events (default 100).
 | `steer` | Human/agent sent instructions |
 | `message` | Message to an agent, e.g. `[AGENTIX UPDATE]` from `system` to the coordinator |
 | `error` | Error occurred |
+
+## Dashboard
+
+Any non-`/api` GET serves the built dashboard from `packages/web/dist` (override with `AGENTIX_WEB_DIST`);
+unknown paths get `index.html` so client routes like `/history` work on reload.
