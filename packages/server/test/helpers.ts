@@ -21,6 +21,8 @@ process.env.PATH = `${BIN}:${process.env.PATH}`;
 // Prompts reach the fakes unchanged unless a test turns the [SHARED CONTEXT] block back on.
 mkdirSync(process.env.AGENTIX_HOME, { recursive: true });
 writeFileSync(join(process.env.AGENTIX_HOME, 'settings.json'), JSON.stringify({ sharedContext: false }));
+// An empty AGENTS.md: no role guidance, so tests see the prompts exactly (roles.test.ts covers it).
+writeFileSync(join(process.env.AGENTIX_HOME, 'AGENTS.md'), '');
 
 // A tiny fake dashboard build for the static-file tests.
 export const WEB = join(TMP, 'web') + '/';

@@ -11,6 +11,7 @@ import { store, AGENTIX_HOME } from './store.ts';
 import { EventBus } from './bus.ts';
 import { getSettings } from './settings.ts';
 import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command } from './commands.ts';
+import { roleGuide } from './roles.ts';
 import { addNote, sharedContextBlock } from './context.ts';
 import { createWorktree, worktreeStatus, mergeWorktree, discardWorktree, removeWorktree, GitError, type WorktreeStatus } from './worktree.ts';
 import { listTasks, createTask, updateTask, deleteTask, getTask, TaskError, TASK_STATUSES } from './tasks.ts';
@@ -393,12 +394,13 @@ export class SessionManager {
     const { signal } = controller;
     this.setStatus(agentId, 'thinking', 'thinking…');
 
-    // Coordinator and CEO get their role instructions once per session (again after a role change).
+    // Every agent gets its role instructions and AGENTS.md guidance once per session (again after a role change).
     let instructions: string | undefined;
-    if (agent.role !== 'worker' && (!agent.nativeSessionId || this.briefed.get(agentId) !== agent.role)) {
-      instructions = agent.role === 'coordinator' ? COORDINATOR_INSTRUCTIONS : CEO_INSTRUCTIONS;
+    if (!agent.nativeSessionId || this.briefed.get(agentId) !== agent.role) {
+      const commands = agent.role === 'coordinator' ? COORDINATOR_INSTRUCTIONS : agent.role === 'ceo' ? CEO_INSTRUCTIONS : '';
+      instructions = [commands, roleGuide(agent.role)].filter(Boolean).join('\n\n') || undefined;
     }
-    if (agent.role !== 'worker') this.briefed.set(agentId, agent.role);
+    this.briefed.set(agentId, agent.role);
     if (agent.role === 'worker') this.advanceTasks(agentId, ['todo', 'review', 'blocked'], 'doing');
     // The CEO always sees what the whole team is doing.
     if (agent.role === 'ceo') {

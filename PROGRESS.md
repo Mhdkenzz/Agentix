@@ -213,3 +213,8 @@ CI runs them after the dashboard build check and uploads `playwright-report/` wh
 - New agent, setup (coordinator and CEO) and every agent's panel / Agents row let you pick the model, from the list
   each CLI gives (Codex catalog with reasoning levels, OpenCode and Pi provider lists with search, Claude aliases,
   Hermes' configured default) or typed by hand. Empty keeps the CLI's own default. `@@spawn ... model=` too.
+
+## AGENTS.md role instructions (2026-10-16)
+- `packages/server/roles/AGENTS.md` says how each role should work: "Everyone", then CEO, Coordinator and Worker.
+  Every agent gets "Everyone" plus its own section with its first prompt of each session (workers too, not only
+  the CEO and coordinator). Copy it to `~/.agentix/AGENTS.md` to edit it; that copy wins. An empty copy turns it off.
