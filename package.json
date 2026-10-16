@@ -1,0 +1,12 @@
+{
+  "name": "agentix",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI agent orchestration — web dashboard + CLI",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test packages/server/test/*.test.ts"
+  }
+}

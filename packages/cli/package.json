@@ -1,0 +1,9 @@
+{
+  "name": "@agentix/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "agentix": "src/agentix.ts"
+  },
+  "scripts": {}
+}
