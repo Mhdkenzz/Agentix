@@ -23,7 +23,7 @@ function Plane({ arc, from, to }: { arc: Arc; from: Vec3; to: Vec3 }) {
     <group ref={ref}>
       <mesh rotation={[Math.PI / 2, 0, 0]} scale={[0.35, 0.5, 0.08]}>
         <coneGeometry args={[0.6, 1, 3]} />
-        <meshStandardMaterial color="#ffffff" emissive="#9fd8ff" emissiveIntensity={0.6} />
+        <meshStandardMaterial color="#ffffff" emissive="#a78bfa" emissiveIntensity={0.6} />
       </mesh>
     </group>
   );

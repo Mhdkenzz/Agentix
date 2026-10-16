@@ -15,11 +15,11 @@ export function Office({ active = true }: { active?: boolean }) {
         </div>
       )}
       <div className="legend">
-        <span><i style={{ background: '#b48cff' }} />thinking</span>
-        <span><i style={{ background: '#38e07b' }} />working</span>
-        <span><i style={{ background: '#ffb000' }} />waiting</span>
-        <span><i style={{ background: '#ff4d5e' }} />error</span>
-        <span><i style={{ background: '#8a93a6' }} />idle</span>
+        <span><i style={{ background: '#a78bfa' }} />thinking</span>
+        <span><i style={{ background: '#34d399' }} />working</span>
+        <span><i style={{ background: '#fbbf24' }} />waiting</span>
+        <span><i style={{ background: '#f87171' }} />error</span>
+        <span><i style={{ background: '#7d7d7d' }} />idle</span>
         <span className="muted">drag to orbit · scroll to zoom · click an agent</span>
       </div>
       {active && <AgentPanel />}

@@ -28,6 +28,7 @@ export function handleOpencodeEvent(ctx: AdapterContext, ev: any): void {
       return;
     case 'reasoning':
       ctx.emit({ type: 'status', text: 'thinking', data: { status: 'thinking', activity: oneLine(part.text || 'thinking…') } });
+      if (part.text) ctx.emit({ type: 'thinking', text: String(part.text) });
       return;
     case 'tool_use': {
       const input = part.state?.input ?? {};

@@ -10,8 +10,8 @@ import type { Vec3 } from './layout.ts';
 import { useStore } from '../store.ts';
 
 const STATUS_COLOR: Record<string, string> = {
-  idle: '#8a93a6', starting: '#7bdcff', thinking: '#b48cff', working: '#38e07b',
-  waiting_input: '#ffb000', error: '#ff4d5e', stopped: '#5c6270',
+  idle: '#7d7d7d', starting: '#22d3ee', thinking: '#a78bfa', working: '#34d399',
+  waiting_input: '#fbbf24', error: '#f87171', stopped: '#4a4a4a',
 };
 
 const ROLE_BADGE: Record<string, string> = { coordinator: '★ coordinator', ceo: '♛ CEO', worker: '' };
@@ -45,7 +45,7 @@ export function AgentSeat({ agent, position, selected, deskColor }: { agent: Age
     }
   });
 
-  const color = STATUS_COLOR[status] ?? '#8a93a6';
+  const color = STATUS_COLOR[status] ?? '#7d7d7d';
   const bubble = status === 'thinking' ? '…' : status === 'waiting_input' ? '?' : agent.activity;
   const showBubble = status !== 'idle' && status !== 'stopped' && bubble;
 

@@ -21,6 +21,7 @@ export type EventType =
   | 'agent.created' | 'agent.updated' | 'agent.removed'
   | 'output'
   | 'tool'
+  | 'thinking'
   | 'status'
   | 'steer'
   | 'message'

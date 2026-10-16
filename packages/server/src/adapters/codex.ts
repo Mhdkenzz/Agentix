@@ -31,6 +31,7 @@ export function handleCodexEvent(ctx: AdapterContext, ev: any): void {
           return;
         case 'reasoning':
           ctx.emit({ type: 'status', text: 'thinking', data: { status: 'thinking', activity: oneLine(item.text || 'thinking…') } });
+          if (done && item.text) ctx.emit({ type: 'thinking', text: String(item.text) });
           return;
         case 'command_execution':
           if (!done) {
