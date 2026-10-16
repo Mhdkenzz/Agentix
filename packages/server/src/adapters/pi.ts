@@ -12,8 +12,9 @@ import { detectCliWithHelp, runCli, parseJson, oneLine, UsageTally } from './pro
 /** What the Pi coding agent's --help mentions; Debian's unrelated `pi` (digits of π) has none of it. */
 export const PI_HELP_SIGNATURE = /--append-system-prompt|--mode\b/;
 
-export function piArgs(prompt: string, sessionId?: string, instructions?: string): string[] {
+export function piArgs(prompt: string, sessionId?: string, instructions?: string, model?: string): string[] {
   const args = ['-p', '--mode', 'json'];
+  if (model) args.push('--model', model); // provider/id, optionally :<thinking>
   if (sessionId) args.push('--session', sessionId);
   if (instructions) args.push('--append-system-prompt', instructions);
   // A leading "-" would parse as a flag and a leading "@" as a file to attach.
@@ -66,7 +67,7 @@ export const piAdapter: AgentAdapter = {
     const failures: string[] = [];
     const usage = new UsageTally();
     try {
-      await runCli(ctx, 'pi', piArgs(prompt, ctx.agent.nativeSessionId, ctx.instructions), line => {
+      await runCli(ctx, 'pi', piArgs(prompt, ctx.agent.nativeSessionId, ctx.instructions, ctx.agent.model), line => {
         const ev = parseJson(line);
         if (ev) handlePiEvent(ctx, ev, failures, usage);
       });

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, type CoordinatorMode, type FoundCli, type ScanResult } from '../api.ts';
 import { useStore } from '../store.ts';
+import { ModelPicker } from '../components/ModelPicker.tsx';
 
 const WHO: { id: CoordinatorMode; title: string; text: string }[] = [
   { id: 'human', title: 'You', text: 'You create and direct every agent yourself.' },
@@ -22,6 +23,8 @@ export function Setup() {
   const [who, setWho] = useState<CoordinatorMode>('both');
   const [coordKind, setCoordKind] = useState('');
   const [coordName, setCoordName] = useState('');
+  const [coordModel, setCoordModel] = useState('');
+  const [ceoModel, setCeoModel] = useState('');
   const [withCeo, setWithCeo] = useState(false);
   const [ceoKind, setCeoKind] = useState('');
   const [task, setTask] = useState('');
@@ -67,8 +70,8 @@ export function Setup() {
         ? `${task.trim()}\n\nThis is the team's first task from kenz. Create the worker agents it needs with @@spawn ` +
           `(installed agent CLIs on this machine: ${kinds}), give each a clear job, then report back with a short plan.`
         : undefined;
-      const coordinator = await api.create({ kind: coordKind, role: 'coordinator', name: coordName.trim() || undefined, avatarId: 'random', prompt: first, replace: true });
-      if (withCeo) await api.create({ kind: ceoKind, role: 'ceo', avatarId: 'random', replace: true });
+      const coordinator = await api.create({ kind: coordKind, role: 'coordinator', name: coordName.trim() || undefined, avatarId: 'random', prompt: first, replace: true, model: coordModel || undefined });
+      if (withCeo) await api.create({ kind: ceoKind, role: 'ceo', avatarId: 'random', replace: true, model: ceoModel || undefined });
       if (withCeo) navigate('/ceo');
       else { select(coordinator.id); navigate('/'); }
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
@@ -112,23 +115,25 @@ export function Setup() {
         {needsAgent && (
           <div className="grid2 setup-pick">
             <label>Coordinator agent
-              <select value={coordKind} onChange={e => setCoordKind(e.target.value)}>
+              <select value={coordKind} onChange={e => { setCoordKind(e.target.value); setCoordModel(''); }}>
                 {!usable.length && <option value="">no supported CLI found</option>}
                 {usable.map(f => <option key={f.kind} value={f.kind}>{f.name}{f.version ? ` (${f.version})` : ''}</option>)}
               </select>
             </label>
             <label>Its name <input value={coordName} onChange={e => setCoordName(e.target.value)} placeholder="random" /></label>
+            {coordKind && <div className="span2"><ModelPicker kind={coordKind} value={coordModel} onChange={setCoordModel} label="Coordinator model" /></div>}
             <label className="check span2">
               <input type="checkbox" checked={withCeo} onChange={e => setWithCeo(e.target.checked)} />
               Also hire a CEO you can talk to (by voice too). It passes your requests to the coordinator.
             </label>
             {withCeo && (
               <label>CEO agent
-                <select value={ceoKind} onChange={e => setCeoKind(e.target.value)}>
+                <select value={ceoKind} onChange={e => { setCeoKind(e.target.value); setCeoModel(''); }}>
                   {usable.map(f => <option key={f.kind} value={f.kind}>{f.name}</option>)}
                 </select>
               </label>
             )}
+            {withCeo && ceoKind && <ModelPicker kind={ceoKind} value={ceoModel} onChange={setCeoModel} label="CEO model" />}
           </div>
         )}
         {needsAgent && hasCoordinator && <p className="muted small">You already have a coordinator; the new one takes over and the old one becomes a worker.</p>}

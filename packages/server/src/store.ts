@@ -85,7 +85,8 @@ function openSqlite(): IStore | null {
       nativeSessionId TEXT,
       createdAt INTEGER NOT NULL,
       archivedAt INTEGER,
-      worktree TEXT
+      worktree TEXT,
+      model TEXT
     );
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +104,7 @@ function openSqlite(): IStore | null {
   const columns = new Set(db.prepare('PRAGMA table_info(agents)').all().map((c: any) => c.name));
   if (!columns.has('archivedAt')) db.exec('ALTER TABLE agents ADD COLUMN archivedAt INTEGER');
   if (!columns.has('worktree')) db.exec('ALTER TABLE agents ADD COLUMN worktree TEXT');
+  if (!columns.has('model')) db.exec('ALTER TABLE agents ADD COLUMN model TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS events_type_ts ON events(type, ts)');
 
   const toAgent = (r: any): Agent => ({
@@ -112,6 +114,7 @@ function openSqlite(): IStore | null {
     createdAt: r.createdAt,
     ...(r.archivedAt != null ? { archivedAt: r.archivedAt } : {}),
     ...(r.worktree ? { worktree: JSON.parse(r.worktree) } : {}),
+    ...(r.model ? { model: r.model } : {}),
   });
   const toEvent = (r: any): AgentEvent => ({
     id: r.id, agentId: r.agentId, type: r.type, ts: r.ts,
@@ -125,9 +128,9 @@ function openSqlite(): IStore | null {
     allAgents: db.prepare('SELECT * FROM agents ORDER BY createdAt ASC'),
     agent: db.prepare('SELECT * FROM agents WHERE id = ?'),
     archive: db.prepare(`UPDATE agents SET archivedAt=?, status='stopped', activity='removed' WHERE id=?`),
-    insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt, worktree)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=?, worktree=? WHERE id=?`),
+    insertAgent: db.prepare(`INSERT INTO agents (id, name, kind, role, avatarId, cwd, status, activity, nativeSessionId, createdAt, worktree, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    updateAgent: db.prepare(`UPDATE agents SET name=?, kind=?, role=?, avatarId=?, cwd=?, status=?, activity=?, nativeSessionId=?, worktree=?, model=? WHERE id=?`),
     setStatus: db.prepare('UPDATE agents SET status=?, activity=? WHERE id=?'),
     setSession: db.prepare('UPDATE agents SET nativeSessionId=? WHERE id=?'),
     deleteAgent: db.prepare('DELETE FROM agents WHERE id = ?'),
@@ -156,11 +159,11 @@ function openSqlite(): IStore | null {
     },
     createAgent: a => {
       q.insertAgent.run(a.id, a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null, a.createdAt,
-        a.worktree ? JSON.stringify(a.worktree) : null);
+        a.worktree ? JSON.stringify(a.worktree) : null, a.model ?? null);
     },
     updateAgent: a => {
       q.updateAgent.run(a.name, a.kind, a.role, a.avatarId, a.cwd, a.status, a.activity, a.nativeSessionId ?? null,
-        a.worktree ? JSON.stringify(a.worktree) : null, a.id);
+        a.worktree ? JSON.stringify(a.worktree) : null, a.model ?? null, a.id);
     },
     setStatus: (id, status, activity) => { q.setStatus.run(status, activity, id); },
     setNativeSessionId: (id, sid) => { q.setSession.run(sid, id); },

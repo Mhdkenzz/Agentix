@@ -81,6 +81,8 @@ export const gooseAdapter: AgentAdapter = {
     const name = ctx.agent.nativeSessionId ?? newGooseSessionName(ctx.agent.id);
     const out = new GooseOutput(ctx);
     try {
+      // goose run takes its model from GOOSE_MODEL (with the provider from goose's own config)
+      if (ctx.agent.model) ctx = { ...ctx, env: { ...ctx.env, GOOSE_MODEL: ctx.agent.model } };
       await runCli(ctx, 'goose', gooseArgs(name, withInstructions(ctx, prompt), resume), line => out.line(line), undefined, true);
     } finally {
       const text = out.finish();

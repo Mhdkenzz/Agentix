@@ -16,11 +16,12 @@
 import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, oneLine, stripAnsi, plainText, UsageTally, type UsageParts } from './proc.ts';
 
-export function aiderArgs(prompt: string, resume: boolean): string[] {
+export function aiderArgs(prompt: string, resume: boolean, model?: string): string[] {
   // argparse reads a value starting with "-" as a flag unless it's attached with "="
   const message = prompt.startsWith('-') ? [`--message=${prompt}`] : ['--message', prompt];
   const args = [...message, '--yes-always', '--no-pretty', '--no-stream', '--no-fancy-input', '--no-check-update', '--no-show-model-warnings', '--no-analytics'];
   if (resume) args.push('--restore-chat-history');
+  if (model) args.push('--model', model);
   return args;
 }
 
@@ -97,7 +98,7 @@ export const aiderAdapter: AgentAdapter = {
     const lines: string[] = [];
     const usage = new UsageTally();
     try {
-      await runCli(ctx, 'aider', aiderArgs(withInstructions(ctx, prompt), Boolean(ctx.agent.nativeSessionId)), line => {
+      await runCli(ctx, 'aider', aiderArgs(withInstructions(ctx, prompt), Boolean(ctx.agent.nativeSessionId), ctx.agent.model), line => {
         const text = handleAiderLine(ctx, line, usage);
         if (text !== null) lines.push(text);
       }, undefined, true);

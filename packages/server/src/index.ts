@@ -8,7 +8,8 @@ import type { AgentEvent } from '../../shared/src/types.ts';
 import { store } from './store.ts';
 import { EventBus } from './bus.ts';
 import { SessionManager, HttpError } from './sessions.ts';
-import { getAllAdapters } from './adapters/index.ts';
+import { getAllAdapters, getAdapter } from './adapters/index.ts';
+import { listModels } from './adapters/models.ts';
 import { getSettings, updateSettings, SettingsError } from './settings.ts';
 import { getBrief, setBrief, listNotes, addNote, deleteNote, searchContextSmart, embed, lastEmbeddingError } from './context.ts';
 import { listTasks } from './tasks.ts';
@@ -133,6 +134,11 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
       const [, resource, id, action, sub] = parts;
 
+      if (resource === 'adapters' && id && action === 'models' && method === 'GET') {
+        if (!getAdapter(id)) throw new HttpError(404, `Unknown agent kind: ${id}`);
+        return sendJson(res, 200, await listModels(id, url.searchParams.get('refresh') === '1'));
+      }
+
       if (resource === 'adapters' && !id && method === 'GET') {
         const adapters = await Promise.all(getAllAdapters().map(async a => ({ kind: a.kind, ...(await a.detect()) })));
         return sendJson(res, 200, { adapters });
@@ -221,7 +227,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (method === 'POST') {
           const b = await readJson(req);
           const agent = sm.createAgent(b.kind, {
-            name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace,
+            name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace, model: b.model,
             ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
           });
           return sendJson(res, 201, { agent });

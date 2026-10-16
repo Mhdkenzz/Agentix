@@ -5,6 +5,7 @@ import { api, ApiError } from '../api.ts';
 import { useStore, fmtTokens, fmtCost } from '../store.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { AVATARS } from '../avatars/index.ts';
+import { ChangeModelModal } from '../components/ModelPicker.tsx';
 import type { Agent, Role } from '../../../shared/src/types.ts';
 
 const BUSY = ['thinking', 'working', 'starting'];
@@ -20,6 +21,7 @@ export function Agents() {
   const [q, setQ] = useState('');
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
+  const [modelFor, setModelFor] = useState<Agent>();
 
   const all = Object.values(agents);
   const kinds = [...new Set(all.map(a => a.kind))].sort();
@@ -72,13 +74,14 @@ export function Agents() {
           Remove {chosen.length || ''}</button>
       </div>
       {error && <div className="error">{error}</div>}
+      {modelFor && <ChangeModelModal agentId={modelFor.id} kind={modelFor.kind} name={modelFor.name} current={modelFor.model} onClose={() => setModelFor(undefined)} />}
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
               <th><input type="checkbox" checked={!!rows.length && chosen.length === rows.length}
                 onChange={e => setPicked(e.target.checked ? new Set(rows.map(a => a.id)) : new Set())} aria-label="Select all" /></th>
-              <th>Agent</th><th>Kind</th><th>Role</th><th>Avatar</th><th>Status</th><th>Doing</th><th title="All-time tokens (input + output)">Tokens</th><th>Cost</th><th>Folder</th><th></th>
+              <th>Agent</th><th>Kind</th><th>Model</th><th>Role</th><th>Avatar</th><th>Status</th><th>Doing</th><th title="All-time tokens (input + output)">Tokens</th><th>Cost</th><th>Folder</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -97,6 +100,7 @@ export function Agents() {
                   </div>
                 </td>
                 <td>{a.kind}</td>
+                <td><button className="link-btn model-tag ellipsis" title="Change the model" onClick={() => setModelFor(a)}>{a.model ?? 'default'}</button></td>
                 <td>
                   <select className="inline" value={a.role} onChange={e => patch(a, { role: e.target.value as Role })}>
                     <option value="worker">worker</option><option value="coordinator">coordinator</option><option value="ceo">CEO</option>
@@ -121,7 +125,7 @@ export function Agents() {
                 </td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan={11} className="muted pad">No agents match.</td></tr>}
+            {!rows.length && <tr><td colSpan={12} className="muted pad">No agents match.</td></tr>}
           </tbody>
         </table>
       </div>

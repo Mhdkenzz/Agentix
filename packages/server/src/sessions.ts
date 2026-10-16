@@ -50,6 +50,17 @@ export interface CreateOptions {
   from?: string;
   /** false: work directly in cwd even when it is a git repo (workers only; default from settings) */
   worktree?: boolean;
+  /** the model for the CLI's model flag; empty = the CLI's default */
+  model?: string;
+}
+
+/** A model name as the CLI's flag takes it: trimmed, no spaces or quotes, empty = default. */
+export function cleanModel(model: unknown): string | undefined {
+  if (model == null) return undefined;
+  const m = String(model).trim();
+  if (!m) return undefined;
+  if (m.length > 200 || /[\s"'`\\]/.test(m) || m.startsWith('-')) throw new HttpError(400, `Not a model name: ${m.slice(0, 60)}`);
+  return m;
 }
 
 /** A random name nobody in the office has yet (falls back to Name-2, Name-3, ... when all are taken). */
@@ -142,6 +153,7 @@ export class SessionManager {
 
     let id = 'a_' + randomUUID().slice(0, 6);
     while (store.getAgent(id, true)) id = 'a_' + randomUUID().slice(0, 6); // removed agents keep their ids
+    const model = cleanModel(opts.model);
     this.claimRole(role, id, opts.replace);
     const name = opts.name || pickName();
 
@@ -166,9 +178,10 @@ export class SessionManager {
       activity: 'idle',
       createdAt: Date.now(),
       ...(worktree ? { worktree } : {}),
+      ...(model ? { model } : {}),
     };
     store.createAgent(agent);
-    this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}, ${role})`, data: agent });
+    this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}${model ? ` ${model}` : ''}, ${role})`, data: agent });
     if (worktree) this.emit(id, { type: 'message', from: 'system', text: `Working on branch ${worktree.branch} in its own worktree (${worktree.path}), from ${worktree.repo}` });
     if (worktreeError) this.emit(id, { type: 'error', from: 'system', text: `No worktree (${oneLine(worktreeError, 200)}); working directly in ${cwd}` });
 
@@ -180,7 +193,7 @@ export class SessionManager {
     return store.getAgent(id)!;
   }
 
-  updateAgent(id: string, patch: { name?: string; avatarId?: number; role?: Role; cwd?: string; replace?: boolean }): Agent {
+  updateAgent(id: string, patch: { name?: string; avatarId?: number; role?: Role; cwd?: string; replace?: boolean; model?: string | null }): Agent {
     const agent = this.requireAgent(id);
     if (patch.role && patch.role !== agent.role) {
       if (!ROLES.includes(patch.role)) throw new HttpError(400, `Unknown role: ${patch.role}`);
@@ -196,6 +209,11 @@ export class SessionManager {
     if (patch.cwd) {
       if (!isAbsolute(patch.cwd)) throw new HttpError(400, 'cwd must be an absolute path');
       agent.cwd = patch.cwd;
+    }
+    if (patch.model !== undefined) {
+      // takes effect from the agent's next turn
+      const model = cleanModel(patch.model);
+      if (model) agent.model = model; else delete agent.model;
     }
     store.updateAgent(agent);
     this.emit(id, { type: 'agent.updated', text: `Agent ${agent.name} updated`, data: agent });
@@ -597,7 +615,7 @@ export class SessionManager {
         const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
         const worktree = o.worktree === undefined ? undefined : !/^(no|false|off|0)$/i.test(o.worktree);
         // The task goes on the board before the worker starts, so its first turn moves it to doing.
-        const created = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree });
+        const created = this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree, model: o.model });
         if (c.text) {
           this.addTask({ title: oneLine(c.text, 140), owner: created.id, status: 'todo' }, source.id);
           this.emit(created.id, { type: 'message', from: source.id, text: c.text });

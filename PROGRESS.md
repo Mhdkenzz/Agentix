@@ -206,3 +206,8 @@ CI runs them after the dashboard build check and uploads `playwright-report/` wh
 - Smarter memory: optional local embeddings through Ollama, fused with BM25. Settings has a Test button; the
   Context page shows which search ran.
 - New adapters: Gemini CLI, Aider, Goose (written from their docs, not yet run against the real CLIs).
+
+## Model picker (2026-10-16)
+- New agent, setup (coordinator and CEO) and every agent's panel / Agents row let you pick the model, from the list
+  each CLI gives (Codex catalog with reasoning levels, OpenCode and Pi provider lists with search, Claude aliases,
+  Hermes' configured default) or typed by hand. Empty keeps the CLI's own default. `@@spawn ... model=` too.

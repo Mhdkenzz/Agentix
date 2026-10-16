@@ -137,9 +137,9 @@ test('Office renders without page errors, and Agents lists the team', async ({ p
   await nav(page, 'Agents').click();
   await expect(page).toHaveURL(/\/agents$/);
   const rows = page.locator('table.table tbody tr');
-  for (const name of ['Nimbus', 'Juno']) {
-    await expect(rows.filter({ has: page.locator(`input[value="${name}"]`) })).toHaveCount(1);
-  }
+  // (the CEO's random name can be Juno too, so match the worker by its kind)
+  await expect(rows.filter({ has: page.locator('input[value="Nimbus"]') })).toHaveCount(1);
+  await expect(rows.filter({ has: page.locator('input[value="Juno"]') }).filter({ hasText: 'codex' })).toHaveCount(1);
   await expect(rows).toHaveCount(3); // CEO, Nimbus, Juno (Rook was removed)
   await expect(rows.filter({ hasText: 'codex' })).toHaveCount(1);
 

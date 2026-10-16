@@ -7,8 +7,9 @@
 import { withInstructions, type AgentAdapter } from './types.ts';
 import { detectCli, runCli } from './proc.ts';
 
-export function hermesArgs(prompt: string, sessionId?: string): string[] {
+export function hermesArgs(prompt: string, sessionId?: string, model?: string): string[] {
   const args = ['chat', '-Q', `--query=${prompt}`, '--source', 'tool', '--yolo'];
+  if (model) args.push('-m', model);
   if (sessionId) args.push('--resume', sessionId);
   return args;
 }
@@ -26,7 +27,7 @@ export const hermesAdapter: AgentAdapter = {
     ctx.emit({ type: 'status', text: 'working', data: { status: 'working', activity: 'working (Hermes reports when done)' } });
     const lines: string[] = [];
     try {
-      await runCli(ctx, 'hermes', hermesArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
+      await runCli(ctx, 'hermes', hermesArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId, ctx.agent.model), line => {
         if (NOTICE.test(line)) return;
         lines.push(line);
       }, line => {

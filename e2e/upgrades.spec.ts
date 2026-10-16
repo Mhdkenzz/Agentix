@@ -76,3 +76,32 @@ test('the agent panel shows the branch diff, and Merge brings the change into th
   expect(readFileSync(join(repo, 'app.js'), 'utf8')).toContain('// added by codex');
   expect(git(repo, 'log', '-1', '--pretty=%s')).toContain('Vega');
 });
+
+test('New agent: pick a model (and reasoning level) from the CLI\'s list, and change it later', async ({ page, request }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '+ New agent' }).click();
+  const modal = page.locator('.modal');
+  await modal.getByLabel('Agent', { exact: true }).selectOption('codex');
+  await modal.getByLabel('Name', { exact: true }).fill('Orion');
+  const picker = modal.locator('.model-picker');
+  const select = picker.locator('select').first();
+  // The fake codex lists two models (a hidden one is left out), plus "CLI default" and "Other".
+  await expect(select.locator('option')).toHaveText(['CLI default', 'GPT-6.1-Sol · gpt-6.1-sol', 'GPT-6-Astra · gpt-6-astra', 'Other (type a name)…']);
+  await select.selectOption('gpt-6.1-sol');
+  await expect(picker).toContainText('Latest workhorse model');
+  await picker.getByLabel('Reasoning level').selectOption('high');
+  await modal.getByRole('button', { name: 'Create agent' }).click();
+
+  const orion = (await (await request.get('/api/agents')).json()).agents.find((a: any) => a.name === 'Orion');
+  expect(orion.model).toBe('gpt-6.1-sol:high');
+
+  // The panel shows the model; change it to "Other" typed by hand.
+  const panel = page.locator('.panel');
+  await expect(panel.locator('.model-tag')).toHaveText('gpt-6.1-sol:high');
+  await panel.locator('.model-tag').click();
+  const change = page.locator('.model-modal');
+  await change.locator('select').first().selectOption({ label: 'Other (type a name)…' });
+  await change.locator('input').fill('gpt-9-preview');
+  await change.getByRole('button', { name: 'Save' }).click();
+  await expect(panel.locator('.model-tag')).toHaveText('gpt-9-preview');
+});

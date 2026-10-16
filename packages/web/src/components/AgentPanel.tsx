@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
 import { useStore, sinceClear, fmtTokens, fmtCost } from '../store.ts';
 import { WorktreeBar } from './WorktreeBar.tsx';
+import { ChangeModelModal } from './ModelPicker.tsx';
 import { SessionButtons } from './SessionButtons.tsx';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { avatarFor } from '../avatars/index.ts';
@@ -21,6 +22,7 @@ export function AgentPanel() {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const [hideStatus, setHideStatus] = useState(true);
+  const [editModel, setEditModel] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -61,7 +63,7 @@ export function AgentPanel() {
         <AvatarThumb id={agent.avatarId} size={44} />
         <div className="grow">
           <div className="panel-title">{agent.name} <span className="muted">· {avatarFor(agent.avatarId).name}</span></div>
-          <div className="muted small">{agent.kind} · {agent.role} · <span className={`st st-${agent.status}`}>{agent.status}</span></div>
+          <div className="muted small">{agent.kind} · <button className="link-btn model-tag" title="Change the model" onClick={() => setEditModel(true)}>{agent.model ?? 'default model'}</button> · {agent.role} · <span className={`st st-${agent.status}`}>{agent.status}</span></div>
           <div className="activity" title={agent.activity}>{agent.activity}</div>
         </div>
         <button className="icon-btn" onClick={() => select(undefined)} aria-label="Close">✕</button>
@@ -92,6 +94,7 @@ export function AgentPanel() {
         {shown.length ? shown.map(e => <EventLine key={e.id} e={e} />) : <div className="muted pad">No events yet.</div>}
       </div>
       {error && <div className="error">{error}</div>}
+      {editModel && <ChangeModelModal agentId={agent.id} kind={agent.kind} name={agent.name} current={agent.model} onClose={() => setEditModel(false)} />}
       <form className="steer" onSubmit={e => { e.preventDefault(); steer(); }}>
         <textarea
           value={text}
