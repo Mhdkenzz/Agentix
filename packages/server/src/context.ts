@@ -7,7 +7,7 @@
 // notes, the output of every other agent and the text files in settings.contextPaths. The brief and the
 // best matches go in front of the prompt as a [SHARED CONTEXT] block, so agents build on each other's work.
 // With embeddings on (Settings: a local Ollama), the search also matches by meaning, not only by words.
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, renameSync, rmSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { Agent } from '../../shared/src/types.ts';
@@ -91,6 +91,16 @@ export function deleteNote(id: string): boolean {
   if (rest.length === notes.length) return false;
   writeAtomic(notesFile(), rest.map(n => JSON.stringify(n) + '\n').join(''));
   return true;
+}
+
+/** Remove the team brief, saved notes, and semantic-search cache for a fresh workspace. */
+export function clearSharedContext(): void {
+  for (const file of [briefFile(), notesFile(), embedFile()]) {
+    try { rmSync(file, { force: true }); } catch { /* best effort */ }
+  }
+  embedCache = undefined;
+  embedModel = '';
+  lastEmbeddingError = '';
 }
 
 // ---------- search ----------

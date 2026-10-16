@@ -229,6 +229,9 @@ Lines in a coordinator's output (the server runs them; see `server/src/commands.
 
 The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`
 and `@@task <id> status=... note=...` for their own tasks. `@@spawn ... worktree=no` skips the worktree. Every CEO turn starts with a `[TEAM STATUS]` digest.
+After a CEO request, Agentix waits for a coordinator reply, sends up to two non-interrupting follow-ups,
+and reports an issue after three unanswered requests. The timeout is 30 seconds by default and can be adjusted
+with `AGENTIX_CEO_REPLY_TIMEOUT_MS`. A coordinator response clears the watchdog.
 
 ### GET `/api/stream`
 

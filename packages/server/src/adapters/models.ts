@@ -7,8 +7,8 @@
 //   pi 1.3.0         `pi --list-models` → table: provider  model  context  max-out  thinking  images
 //   claude 2.1.300   no list command; --model takes the aliases fable, opus, sonnet, haiku or a full name
 //   hermes 0.22.2    no list command; default from model.default in ~/.hermes/config.yaml
-// gemini, aider and goose: no list here, so the picker offers a free-text name.
-// Lists are cached for 10 minutes; every picker also accepts a name typed by hand.
+// gemini, aider and goose: no list here, so only the CLI default can be selected.
+// Lists are cached for 10 minutes.
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -110,15 +110,35 @@ const LISTERS: Record<string, () => Promise<ModelList>> = {
   },
 };
 
-/** Models for one CLI kind; an empty list (with `error` when listing failed) means "type a name". */
+/** Models for one CLI kind; an empty list means only the CLI default is available. */
 export async function listModels(kind: string, refresh = false): Promise<ModelList> {
   const hit = cache.get(kind);
   if (hit && !refresh && Date.now() - hit.at < CACHE_MS) return hit.list;
   const lister = LISTERS[kind];
   let list: ModelList;
-  try { list = lister ? await lister() : { models: [] }; } catch (err) {
+  try {
+    list = lister
+      ? await lister()
+      : { models: [], error: `${kind} does not expose an available model list; use the CLI default` };
+  } catch (err) {
     list = { models: [], error: `Could not list ${kind} models: ${(err as Error).message}` };
   }
   if (!list.error) cache.set(kind, { at: Date.now(), list });
   return list;
+}
+
+/** Return an error when a non-default model is not in the CLI's available list. */
+export async function unavailableModelError(kind: string, model: string): Promise<string | undefined> {
+  const list = await listModels(kind);
+  if (list.error) return `${list.error}. Model "${model}" cannot be selected.`;
+  if (!list.models.length) return `${kind} does not expose an available model list; use the CLI default instead`;
+  if (list.models.some(option => option.id === model)) return undefined;
+
+  // Codex encodes the selected reasoning level as model:effort in the stored value.
+  const separator = model.lastIndexOf(':');
+  if (separator > 0) {
+    const base = list.models.find(option => option.id === model.slice(0, separator));
+    if (base?.efforts?.includes(model.slice(separator + 1))) return undefined;
+  }
+  return `Model "${model}" is not in ${kind}'s available model list.`;
 }

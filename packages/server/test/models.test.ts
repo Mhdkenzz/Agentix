@@ -81,13 +81,22 @@ echo '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"o
   assert.equal(r.body.current, 'gpt-5.6-luna:high');
 
   assert.deepEqual((await json('/api/adapters/claude/models')).body.models.map((m: any) => m.id), ['fable', 'opus', 'sonnet', 'haiku']);
-  assert.deepEqual((await json('/api/adapters/gemini/models')).body.models, [], 'no list: free text');
+  const gemini = await json('/api/adapters/gemini/models');
+  assert.deepEqual(gemini.body.models, [], 'no model list');
+  assert.match(gemini.body.error, /does not expose an available model list/i);
   assert.equal((await json('/api/adapters/nope/models')).status, 404);
 });
 
 test('an agent created with a model runs with it; the model can be changed or cleared later', async () => {
   const bad = await json('/api/agents', 'POST', { kind: 'codex', name: 'Bad', cwd: WORK, model: 'x" --danger' });
   assert.equal(bad.status, 400);
+  const unavailable = await json('/api/agents', 'POST', { kind: 'codex', name: 'Unavailable', cwd: WORK, model: 'gpt-not-listed' });
+  assert.equal(unavailable.status, 400);
+  assert.match(unavailable.body.error, /not in codex.*available model list/i);
+  const badEffort = await json('/api/agents', 'POST', { kind: 'codex', name: 'Bad effort', cwd: WORK, model: 'gpt-6.1-sol:nope' });
+  assert.equal(badEffort.status, 400);
+  const noList = await json('/api/agents', 'POST', { kind: 'gemini', name: 'Default only', cwd: WORK, model: 'gemini-2.5-pro' });
+  assert.equal(noList.status, 400);
 
   const { status, body } = await json('/api/agents', 'POST', { kind: 'codex', name: 'Sol', cwd: WORK, model: 'gpt-6-astra', prompt: 'hi' });
   assert.equal(status, 201);
@@ -97,8 +106,11 @@ test('an agent created with a model runs with it; the model can be changed or cl
   await waitFor(() => !sm.isRunning(id), 5000, 'turn done');
 
   const p = await json(`/api/agents/${id}`, 'PATCH', { model: 'gpt-6.1-sol' });
+  assert.equal(p.status, 200);
   assert.equal(p.body.agent.model, 'gpt-6.1-sol');
   assert.equal(sm.getAgent(id)?.model, 'gpt-6.1-sol', 'stored');
+  const patchUnavailable = await json(`/api/agents/${id}`, 'PATCH', { model: 'gpt-not-listed' });
+  assert.equal(patchUnavailable.status, 400);
   const cleared = await json(`/api/agents/${id}`, 'PATCH', { model: '' });
   assert.equal(cleared.body.agent.model, undefined, 'empty = back to the CLI default');
 });

@@ -60,32 +60,45 @@ export function AgentPanel() {
   return (
     <aside className="panel">
       <header className="panel-head">
-        <AvatarThumb id={agent.avatarId} size={44} />
-        <div className="grow">
-          <div className="panel-title">{agent.name} <span className="muted">· {avatarFor(agent.avatarId).name}</span></div>
-          <div className="muted small">{agent.kind} · <button className="link-btn model-tag" title="Change the model" onClick={() => setEditModel(true)}>{agent.model ?? 'default model'}</button> · {agent.role} · <span className={`st st-${agent.status}`}>{agent.status}</span></div>
+        <div className="panel-avatar"><AvatarThumb id={agent.avatarId} size={44} /></div>
+        <div className="grow panel-head-copy">
+          <div className="panel-title-row">
+            <div className="panel-title">{agent.name}</div>
+            <span className="muted small">{avatarFor(agent.avatarId).name}</span>
+          </div>
+          <div className="panel-meta">
+            <span className="panel-chip">{agent.kind}</span>
+            <button className="panel-chip panel-model model-tag" title="Change the model" onClick={() => setEditModel(true)}>{agent.model ?? 'default model'}</button>
+            <span className="panel-chip">{agent.role}</span>
+            <span className={`panel-status st st-${agent.status}`}><i />{agent.status}</span>
+          </div>
           <div className="activity" title={agent.activity}>{agent.activity}</div>
         </div>
         <button className="icon-btn" onClick={() => select(undefined)} aria-label="Close">✕</button>
       </header>
-      <div className="panel-sub muted small" title={agent.cwd}>📁 {agent.cwd}{agent.nativeSessionId ? ` · session ${agent.nativeSessionId.slice(0, 12)}` : ''}</div>
+      <div className="panel-context">
+        <div className="panel-location" title={agent.cwd}><span className="panel-context-icon">📁</span><span>{agent.cwd}</span></div>
+        {agent.nativeSessionId && <div className="panel-session"><span className="panel-context-icon">↺</span><span>session {agent.nativeSessionId.slice(0, 12)}</span></div>}
+      </div>
       {usage && (
-        <div className="panel-sub usage-line small" title={`${usage.turns} turns · ${usage.input.toLocaleString()} in · ${usage.output.toLocaleString()} out${usage.cacheRead ? ` · ${usage.cacheRead.toLocaleString()} from cache` : ''}`}>
+        <div className="panel-usage usage-line small" title={`${usage.turns} turns · ${usage.input.toLocaleString()} in · ${usage.output.toLocaleString()} out${usage.cacheRead ? ` · ${usage.cacheRead.toLocaleString()} from cache` : ''}`}>
           ◔ {fmtTokens(usage.input + usage.output)} tokens <span className="muted">({fmtTokens(usage.input)} in, {fmtTokens(usage.output)} out)</span>{usage.cost ? <> · <span className="cost">{fmtCost(usage.cost)}</span></> : ''}
         </div>
       )}
       <WorktreeBar agent={agent} onError={setError} />
       {myTasks.length > 0 && (
         <div className="panel-tasks">
-          {myTasks.map(t => <div key={t.id} className={`ptask ptask-${t.status}`} title={t.note}><span className="ptask-st">{t.status}</span>{t.title}</div>)}
+          <div className="panel-section-label">Assigned tasks</div>
+          {myTasks.map(t => <div key={t.id} className={`ptask ptask-${t.status}`} title={t.note}><span className="ptask-st">{t.status}</span><span className="ptask-title">{t.title}</span></div>)}
         </div>
       )}
-      <div className="row panel-tools">
+      <div className="panel-tools">
         <label className="check"><input type="checkbox" checked={hideStatus} onChange={e => setHideStatus(e.target.checked)} /> hide status and usage lines</label>
-        <div className="grow" />
-        <SessionButtons agent={agent} onError={setError} />
-        <button className="btn small" disabled={!busy} onClick={() => act(() => api.interrupt(agent.id))}>Interrupt</button>
-        <button className="btn small danger" onClick={() => { if (confirmRemove(agent.name)) act(() => api.remove(agent.id)); }}>Remove</button>
+        <div className="panel-actions">
+          <SessionButtons agent={agent} onError={setError} />
+          <button className="btn small" disabled={!busy} onClick={() => act(() => api.interrupt(agent.id))}>Interrupt</button>
+          <button className="btn small danger" onClick={() => { if (confirmRemove(agent.name)) act(() => api.remove(agent.id)); }}>Remove</button>
+        </div>
       </div>
       <div className="log" ref={logRef} onScroll={e => {
         const el = e.currentTarget;
@@ -96,15 +109,19 @@ export function AgentPanel() {
       {error && <div className="error">{error}</div>}
       {editModel && <ChangeModelModal agentId={agent.id} kind={agent.kind} name={agent.name} current={agent.model} onClose={() => setEditModel(false)} />}
       <form className="steer" onSubmit={e => { e.preventDefault(); steer(); }}>
-        <textarea
-          value={text}
-          onChange={e => setText(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); steer(); } }}
-          placeholder={viaCoordinator ? `Ask ${coordinator!.name} (coordinator) about ${agent.name}…`
-            : busy ? `Steer ${agent.name} (interrupts the current turn)…` : `Tell ${agent.name} what to do…`}
-          rows={2}
-        />
-        <button className="btn primary" disabled={!text.trim()}>Send</button>
+        <div className="steer-label">{viaCoordinator ? `Message ${coordinator!.name} about ${agent.name}` : busy ? `Steer ${agent.name}` : `Send a task to ${agent.name}`}</div>
+        <div className="steer-row">
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); steer(); } }}
+            placeholder={viaCoordinator ? `Ask ${coordinator!.name} (coordinator)…`
+              : busy ? 'This will interrupt the current turn…' : 'What should this agent do?'}
+            rows={2}
+          />
+          <button className="btn primary" disabled={!text.trim()}>Send</button>
+        </div>
+        <div className="steer-meta">Enter to send <span>·</span> Shift + Enter for a new line</div>
       </form>
       {agent.role === 'worker' && coordinator && mode !== 'human' && (
         <div className="muted small hint">{viaCoordinator

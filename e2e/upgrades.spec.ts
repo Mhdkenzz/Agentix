@@ -85,8 +85,8 @@ test('New agent: pick a model (and reasoning level) from the CLI\'s list, and ch
   await modal.getByLabel('Name', { exact: true }).fill('Orion');
   const picker = modal.locator('.model-picker');
   const select = picker.locator('select').first();
-  // The fake codex lists two models (a hidden one is left out), plus "CLI default" and "Other".
-  await expect(select.locator('option')).toHaveText(['CLI default', 'GPT-6.1-Sol · gpt-6.1-sol', 'GPT-6-Astra · gpt-6-astra', 'Other (type a name)…']);
+  // The fake codex lists two models (a hidden one is left out), plus "CLI default".
+  await expect(select.locator('option')).toHaveText(['CLI default (gpt-5.6-luna:high)', 'GPT-6.1-Sol · gpt-6.1-sol', 'GPT-6-Astra · gpt-6-astra']);
   await select.selectOption('gpt-6.1-sol');
   await expect(picker).toContainText('Latest workhorse model');
   await picker.getByLabel('Reasoning level').selectOption('high');
@@ -95,13 +95,28 @@ test('New agent: pick a model (and reasoning level) from the CLI\'s list, and ch
   const orion = (await (await request.get('/api/agents')).json()).agents.find((a: any) => a.name === 'Orion');
   expect(orion.model).toBe('gpt-6.1-sol:high');
 
-  // The panel shows the model; change it to "Other" typed by hand.
+  // The panel shows the model; change it to another available model.
   const panel = page.locator('.panel');
   await expect(panel.locator('.model-tag')).toHaveText('gpt-6.1-sol:high');
   await panel.locator('.model-tag').click();
   const change = page.locator('.model-modal');
-  await change.locator('select').first().selectOption({ label: 'Other (type a name)…' });
-  await change.locator('input').fill('gpt-9-preview');
+  await change.locator('select').first().selectOption('gpt-6-astra');
   await change.getByRole('button', { name: 'Save' }).click();
-  await expect(panel.locator('.model-tag')).toHaveText('gpt-9-preview');
+  await expect(panel.locator('.model-tag')).toHaveText('gpt-6-astra');
+});
+
+test('sessions: active sessions can be selected, and a new session dialog opens', async ({ page }) => {
+  await page.goto('/');
+  const sessions = page.getByRole('combobox', { name: 'Active sessions' });
+  await expect(sessions).toBeEnabled();
+  await expect(sessions.locator('option')).not.toHaveCount(1);
+
+  await page.getByRole('button', { name: '+ New session' }).click();
+  const modal = page.locator('.session-modal');
+  await expect(modal).toContainText('Start a fresh native conversation');
+  await expect(modal.getByRole('combobox', { name: 'Agent', exact: true })).toBeVisible();
+  await modal.getByRole('button', { name: 'Cancel' }).click();
+
+  await sessions.selectOption({ index: 1 });
+  await expect(page.locator('.panel')).toBeVisible();
 });

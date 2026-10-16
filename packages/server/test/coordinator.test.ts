@@ -61,6 +61,16 @@ test('coordinator @@spawn creates a worker at work, @@steer and @@stop reach it'
   await waitFor(() => evs(coord.id, 'error').some(e => /no agent called "Nobody"/.test(e.text!)), 3000, 'error');
 });
 
+test('coordinator task assignment starts an existing idle worker', async () => {
+  const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
+  const worker = sm.createAgent('mock', { name: 'AssignedWorker' });
+  const title = 'work an already-created assignment';
+  await idle(coord.id).catch(() => {});
+  await sm.steerAgent(coord.id, `say: @@task owner=${worker.name} :: ${title}`);
+  await waitFor(() => evs(worker.id, 'output').some(e => e.text?.includes(title)), 8000, 'worker task turn');
+  assert.equal(sm.getAgent(worker.id)!.status, 'idle');
+});
+
 test('CEO: sees the team digest, can only @@tell the coordinator', async () => {
   const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
   await idle(coord.id).catch(() => {});
@@ -93,6 +103,26 @@ test('coordinator @@tell ceo starts a CEO turn (queued while the CEO is busy)', 
   await waitFor(() => evs(ceo.id, 'output').some(e => /\[FROM COORDINATOR Boss\] tests are green/.test(e.text!)), 10000, 'CEO turn');
   // the lunch turn finished first (it wasn't interrupted)
   assert.ok(evs(ceo.id, 'output').some(e => e.text!.includes('think about lunch')));
+
+  // A coordinator may have an older turn that says @@steer for a CEO report. Treat it
+  // as @@tell so the report is delivered and the CEO's active turn is not interrupted.
+  await idle(coord.id).catch(() => {});
+  await sm.steerAgent(coord.id, 'say: @@steer Chief :: the delegation update is complete');
+  await waitFor(() => evs(ceo.id, 'message').some(e => e.from === coord.id && e.text === 'the delegation update is complete'), 3000, 'legacy CEO report');
+  await waitFor(() => evs(ceo.id, 'output').some(e => /delegation update is complete/.test(e.text!)), 10000, 'legacy CEO report turn');
+  assert.equal(evs(coord.id, 'error').some(e => /use "@@tell ceo/.test(e.text!)), false, 'legacy report is not rejected');
+});
+
+test('an unanswered CEO request is retried three times and reported without interruption', async () => {
+  const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
+  const ceo = sm.getAgents().find(a => a.role === 'ceo')!;
+  const request = 'please acknowledge this request without using a CEO reply command';
+  await idle(ceo.id).catch(() => {});
+  await sm.steerAgent(ceo.id, `say: @@tell coordinator :: ${request}`);
+
+  await waitFor(() => evs(coord.id, 'message').filter(e => e.from === ceo.id && e.text?.includes(request)).length >= 3, 6000, 'three CEO requests');
+  await waitFor(() => evs(ceo.id, 'error').some(e => /after 3 requests/.test(e.text!)), 6000, 'CEO issue report');
+  assert.equal(evs(coord.id, 'steer').some(e => e.from === ceo.id && e.text?.includes(request)), false, 'follow-ups do not interrupt the coordinator');
 });
 
 test('human coordinator mode: no updates, coordinator commands not run', async () => {

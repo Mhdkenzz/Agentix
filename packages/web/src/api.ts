@@ -65,6 +65,7 @@ export interface ScanResult { scanner: 'python' | 'node'; platform: string; foun
 export const api = {
   settings: () => call<{ settings: ServerSettings }>('/api/settings').then(r => r.settings),
   saveSettings: (patch: Partial<ServerSettings>) => call<{ settings: ServerSettings }>('/api/settings', 'PUT', patch).then(r => r.settings),
+  resetWorkspace: () => call<{ ok: boolean; settings: ServerSettings }>('/api/reset', 'POST'),
   askCoordinator: (text: string, about?: string) => call('/api/coordinator/ask', 'POST', { text, about }),
   adapters: () => call<{ adapters: AdapterInfo[] }>('/api/adapters').then(r => r.adapters),
   models: (kind: string, refresh = false) => call<ModelList>(`/api/adapters/${encodeURIComponent(kind)}/models${refresh ? '?refresh=1' : ''}`),

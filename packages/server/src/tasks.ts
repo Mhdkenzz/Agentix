@@ -2,7 +2,7 @@
 //
 // The coordinator plans with "@@task" lines, kenz edits the board in the dashboard, and the session manager
 // moves a worker's tasks along on its own: doing while it works, review when its turn ends, blocked on failure.
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Task, TaskStatus } from '../../shared/src/types.ts';
@@ -78,4 +78,10 @@ export function deleteTask(id: string): boolean {
   if (rest.length === tasks.length) return false;
   save(rest);
   return true;
+}
+
+/** Remove every task from the board for a fresh workspace. */
+export function clearTasks(): void {
+  cache = [];
+  try { rmSync(file(), { force: true }); } catch { /* best effort */ }
 }
