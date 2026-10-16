@@ -9,6 +9,7 @@ import { store } from './store.ts';
 import { EventBus } from './bus.ts';
 import { SessionManager, HttpError } from './sessions.ts';
 import { getAllAdapters } from './adapters/index.ts';
+import { getSettings, updateSettings, SettingsError } from './settings.ts';
 
 export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
 export const HOST = '127.0.0.1';
@@ -98,7 +99,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 
     // CORS for the Vite dev server (Step 2)
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
@@ -116,6 +117,19 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
       }
 
       if (resource === 'stream' && !id && method === 'GET') return serveSSE(req, res, url, bus);
+
+      if (resource === 'settings' && !id) {
+        if (method === 'GET') return sendJson(res, 200, { settings: getSettings() });
+        if (method === 'PUT' || method === 'PATCH') {
+          try { return sendJson(res, 200, { settings: updateSettings(await readJson(req)) }); }
+          catch (e) { if (e instanceof SettingsError) throw new HttpError(400, e.message); throw e; }
+        }
+      }
+
+      if (resource === 'coordinator' && id === 'ask' && method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, { event: sm.askCoordinator(b.text, b.about) });
+      }
 
       if (resource === 'agents' && !id) {
         if (method === 'GET') {

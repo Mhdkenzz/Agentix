@@ -30,7 +30,18 @@ export interface NewAgent {
   replace?: boolean;
 }
 
+export type CoordinatorMode = 'human' | 'agent' | 'both';
+export interface ServerSettings {
+  coordinatorMode: CoordinatorMode;
+  cliPaths: Record<string, string>;
+  defaultKind: string;
+  defaultCwd: string;
+}
+
 export const api = {
+  settings: () => call<{ settings: ServerSettings }>('/api/settings').then(r => r.settings),
+  saveSettings: (patch: Partial<ServerSettings>) => call<{ settings: ServerSettings }>('/api/settings', 'PUT', patch).then(r => r.settings),
+  askCoordinator: (text: string, about?: string) => call('/api/coordinator/ask', 'POST', { text, about }),
   adapters: () => call<{ adapters: AdapterInfo[] }>('/api/adapters').then(r => r.adapters),
   agents: () => call<{ agents: Agent[] }>('/api/agents').then(r => r.agents),
   snapshot: () => call<{ agents: Agent[]; lastEventId: number }>('/api/agents'),

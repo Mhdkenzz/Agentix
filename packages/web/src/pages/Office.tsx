@@ -2,12 +2,12 @@ import { OfficeScene } from '../office/OfficeScene.tsx';
 import { AgentPanel } from '../components/AgentPanel.tsx';
 import { useStore } from '../store.ts';
 
-export function Office() {
+export function Office({ active = true }: { active?: boolean }) {
   const empty = useStore(s => Object.keys(s.agents).length === 0);
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
   return (
     <div className="office">
-      <OfficeScene />
+      <OfficeScene active={active} />
       {empty && (
         <div className="empty-hint">
           <p>The office is empty.</p>
@@ -22,7 +22,7 @@ export function Office() {
         <span><i style={{ background: '#8a93a6' }} />idle</span>
         <span className="muted">drag to orbit · scroll to zoom · click an agent</span>
       </div>
-      <AgentPanel />
+      {active && <AgentPanel />}
     </div>
   );
 }

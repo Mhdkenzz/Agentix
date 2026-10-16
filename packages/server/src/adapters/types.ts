@@ -9,6 +9,13 @@ export interface AdapterContext {
   setNativeSessionId(id: string): void;
   /** aborted when the turn is interrupted or steered; the adapter must stop promptly */
   signal: AbortSignal;
+  /** role instructions (coordinator/CEO) to give before the prompt; set once per session */
+  instructions?: string;
+}
+
+/** The prompt with role instructions in front, for CLIs without a separate system-prompt flag. */
+export function withInstructions(ctx: AdapterContext, prompt: string): string {
+  return ctx.instructions ? `${ctx.instructions}\n\n---\n\n${prompt}` : prompt;
 }
 
 export interface AgentAdapter {

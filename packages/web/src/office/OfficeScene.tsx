@@ -57,7 +57,7 @@ function CeoCorner() {
   );
 }
 
-export function OfficeScene() {
+export function OfficeScene({ active = true }: { active?: boolean }) {
   const agents = useStore(s => s.agents);
   const selectedId = useStore(s => s.selectedId);
   const select = useStore(s => s.select);
@@ -70,7 +70,7 @@ export function OfficeScene() {
   const { z1 } = roomBounds(workers);
 
   return (
-    <Canvas shadows="percentage" dpr={[1, 1.5]} camera={{ position: [1, 13, z1 + 6], fov: 45 }} onPointerMissed={() => select(undefined)}>
+    <Canvas frameloop={active ? 'always' : 'never'} shadows="percentage" dpr={[1, 1.5]} camera={{ position: [1, 13, z1 + 6], fov: 45 }} onPointerMissed={() => select(undefined)}>
       {/* The first drei <Html> mounted in a Canvas renders empty (seen with drei 10.7 + React 19.3),
           so mount a throwaway one before the real name tags. */}
       <Html><span /></Html>

@@ -4,7 +4,7 @@
 //   claude -p --output-format stream-json --verbose --permission-mode acceptEdits [--resume <id>] -- <prompt>
 // stream-json lines: {type:'system',subtype:'init',session_id}, {type:'assistant',message:{content:[...]}},
 //   {type:'result',is_error,result,session_id}
-import type { AgentAdapter, AdapterContext } from './types.ts';
+import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
 
 export function claudeArgs(prompt: string, sessionId?: string): string[] {
@@ -41,7 +41,7 @@ export const claudeAdapter: AgentAdapter = {
   detect: () => detectCli('claude'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'claude', claudeArgs(prompt, ctx.agent.nativeSessionId), line => {
+    await runCli(ctx, 'claude', claudeArgs(withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
       const ev = parseJson(line);
       if (ev) handleClaudeEvent(ctx, ev);
       else ctx.emit({ type: 'output', text: line });

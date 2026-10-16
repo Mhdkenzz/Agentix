@@ -5,7 +5,7 @@
 //           (resume has no -s/-C, so the sandbox goes through -c and the cwd is the process cwd)
 // JSONL events: thread.started{thread_id}, turn.started, item.started/item.completed{item},
 //   turn.completed{usage}, turn.failed{error}, error{message}
-import type { AgentAdapter, AdapterContext } from './types.ts';
+import { withInstructions, type AgentAdapter, type AdapterContext } from './types.ts';
 import { detectCli, runCli, parseJson, oneLine } from './proc.ts';
 
 const SANDBOX = process.env.AGENTIX_CODEX_SANDBOX || 'workspace-write';
@@ -76,7 +76,7 @@ export const codexAdapter: AgentAdapter = {
   detect: () => detectCli('codex'),
 
   async send(ctx, prompt) {
-    await runCli(ctx, 'codex', codexArgs(ctx.agent.cwd, prompt, ctx.agent.nativeSessionId), line => {
+    await runCli(ctx, 'codex', codexArgs(ctx.agent.cwd, withInstructions(ctx, prompt), ctx.agent.nativeSessionId), line => {
       const ev = parseJson(line);
       if (ev) handleCodexEvent(ctx, ev);
       else ctx.emit({ type: 'output', text: line });

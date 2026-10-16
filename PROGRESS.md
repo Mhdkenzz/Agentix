@@ -101,4 +101,33 @@ What's there:
 Gotcha: the first drei `<Html>` in a Canvas renders empty with drei 10.7 + React 19.3, so the scene
 mounts a throwaway one first.
 
-## Next: Step 3 — coordinator and CEO
+## Step 3: Coordinator and CEO — done (2026-10-16)
+
+- **@@ commands** (`server/src/commands.ts`): the coordinator's output can contain
+  `@@spawn kind=… name=… avatar=… cwd=… :: task`, `@@steer <id|name> :: text`, `@@stop <id|name>` and
+  `@@tell ceo :: text`; the CEO can only `@@tell coordinator :: text` (anything else is an error on the CEO).
+  Each command shows as a `message`/`steer` event from the sender, so the office flies a paper plane.
+  Bad commands become `error` events on the sender.
+- **Role instructions**: coordinator and CEO get a short brief on their first turn of a session (and again
+  after a role change). CLI adapters put it in front of the prompt (`withInstructions`); mock ignores it.
+- **CEO digest**: every CEO turn starts with `[TEAM STATUS]` (all agents, status, activity, last output),
+  then `[FROM KENZ]` and kenz's words. Coordinator → CEO messages are queued while the CEO is busy.
+- **Coordinator modes** (`GET/PUT /api/settings`, top-bar selector, `~/.agentix/settings.json`):
+  `human` (kenz coordinates; no updates, coordinator commands ignored), `agent` (the dashboard sends kenz's
+  worker instructions to the coordinator via `POST /api/coordinator/ask`), `both` (default).
+- **CEO page** (`/ceo`): chat with the CEO, hold Space or the mic button to talk (Web Speech API, Chrome/Edge),
+  replies read aloud (toggle), text works everywhere, team sidebar. "Hire a CEO" if there isn't one.
+- Mock adapter: prompt lines starting `say: ` are output verbatim, so a mock coordinator/CEO can issue
+  commands (`agentix steer <coord> "say: @@spawn kind=mock :: hi"`).
+- Settings also hold per-adapter CLI path overrides (`cliPaths`), used by `detect` and every run;
+  `AGENTIX_<KIND>_BIN` works too.
+
+### Acceptance checks
+1. ✅ Steering a worker from the UI → coordinator's `[AGENTIX UPDATE]` turn 5.1 s later (headless Chromium).
+2. ✅ Coordinator `@@spawn` puts a new worker at a desk; `@@steer` steers it; `@@stop` stops it.
+3. ✅ CEO "@@tell coordinator :: start the tests" → `message` CEO→coordinator; nothing from CEO to any worker.
+4. ⚠️ Voice: push-to-talk and speech output are wired to the Web Speech API but can't be tested headless.
+   Try it in Chrome on `/ceo`. Recognition usually needs internet.
+- 39/39 `node --test` (8 new in `coordinator.test.ts`).
+
+## Next: Step 4 — more pages and adapters
