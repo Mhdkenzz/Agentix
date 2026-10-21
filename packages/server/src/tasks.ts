@@ -4,7 +4,6 @@
 // moves a worker's tasks along on its own: doing while it works, review when its turn ends, blocked on failure.
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { Task, TaskStatus } from '../../shared/src/types.ts';
 import { AGENTIX_HOME } from './store.ts';
 
@@ -13,17 +12,24 @@ const MAX_TITLE = 300;
 
 const file = () => join(AGENTIX_HOME, 'tasks.json');
 let cache: Task[] | undefined;
+/** The next task number. It only ever goes up, so a deleted task never hands its id to a new one. */
+let nextId = 1;
 
 export function listTasks(): Task[] {
   if (!cache) {
-    try { cache = JSON.parse(readFileSync(file(), 'utf8')).tasks ?? []; } catch { cache = []; }
+    try {
+      const data = JSON.parse(readFileSync(file(), 'utf8'));
+      const tasks: Task[] = data.tasks ?? [];
+      cache = tasks;
+      nextId = Math.max(Number(data.nextId) || 1, ...tasks.map(t => (Number(t.id.slice(1)) || 0) + 1));
+    } catch { cache = []; nextId = 1; }
   }
   return cache!.map(t => ({ ...t }));
 }
 
 function save(tasks: Task[]) {
   mkdirSync(AGENTIX_HOME, { recursive: true });
-  writeFileSync(file() + '.tmp', JSON.stringify({ tasks }, null, 2));
+  writeFileSync(file() + '.tmp', JSON.stringify({ tasks, nextId }, null, 2));
   renameSync(file() + '.tmp', file());
   cache = tasks;
 }
@@ -41,8 +47,8 @@ export function createTask(fields: { title: string; owner?: string; status?: Tas
   if (!TASK_STATUSES.includes(status)) throw new TaskError(`status must be one of ${TASK_STATUSES.join(', ')}`);
   const now = Date.now();
   const tasks = listTasks();
-  // short ids the coordinator can type: t1, t2, ...
-  const n = tasks.reduce((m, t) => Math.max(m, Number(t.id.slice(1)) || 0), 0) + 1;
+  // short ids the coordinator can type: t1, t2, ... They never repeat, not even after a delete.
+  const n = nextId++;
   const task: Task = {
     id: `t${n}`, title, status, by: fields.by, createdAt: now, updatedAt: now,
     ...(fields.owner ? { owner: fields.owner } : {}), ...(fields.note ? { note: fields.note } : {}),
@@ -83,5 +89,6 @@ export function deleteTask(id: string): boolean {
 /** Remove every task from the board for a fresh workspace. */
 export function clearTasks(): void {
   cache = [];
+  nextId = 1;
   try { rmSync(file(), { force: true }); } catch { /* best effort */ }
 }

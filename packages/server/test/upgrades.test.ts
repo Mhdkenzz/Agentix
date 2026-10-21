@@ -17,9 +17,9 @@ const { server, sessionManager: sm, port } = await startServer(0);
 const base = `http://127.0.0.1:${port}`;
 after(async () => { await sm.shutdown(); server.closeAllConnections(); server.close(); });
 
-const json = async (path: string, method = 'GET', body?: unknown) => {
+const json = async (path: string, method = 'GET', body?: any) => {
   const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await r.json() as any };
 };
 const idle = (id: string) => waitFor(() => !sm.isRunning(id) && sm.getAgent(id)?.status === 'idle', 5000, `${id} idle`);
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' }).trim();
@@ -47,6 +47,7 @@ test('a worker started in a git repo gets its own worktree and branch; merge, di
   assert.equal(st.target, 'main');
   assert.match(st.diff, /hello from Rook/);
   assert.equal(readFileSync(join(REPO, 'README.md'), 'utf8'), 'hello\n', 'the main checkout is untouched');
+  assert.equal(git(a.worktree.path, 'diff', '--cached', '--name-only'), '', 'looking at the diff staged nothing');
 
   const m = await json(`/api/agents/${a.id}/worktree/merge`, 'POST');
   assert.equal(m.status, 200, JSON.stringify(m.body));
@@ -108,6 +109,13 @@ test('task board: coordinator plans with @@task, spawned workers move their task
   assert.equal((await json('/api/tasks', 'POST', { title: '' })).status, 400);
   assert.equal((await json(`/api/tasks/${t.id}`, 'DELETE')).status, 200);
   assert.equal((await json(`/api/tasks/${t.id}`, 'DELETE')).status, 404);
+  // ids never repeat: deleting the newest task does not free its number
+  const again = (await json('/api/tasks', 'POST', { title: 'Another one' })).body.task;
+  assert.equal(again.id, 't4');
+  await json(`/api/tasks/${again.id}`, 'DELETE');
+  const yetAnother = (await json('/api/tasks', 'POST', { title: 'And one more' })).body.task;
+  assert.equal(yetAnother.id, 't5', 'the id of a deleted task is not handed out again');
+  await json(`/api/tasks/${yetAnother.id}`, 'DELETE');
   assert.ok((await json('/api/tasks')).body.tasks.length >= 2);
   await idle(coord.id);
 });
@@ -148,7 +156,7 @@ test('embedding search finds a note by meaning; keyword search alone does not', 
 
   addNote('Users sign in on the login page with GitHub OAuth');
   addNote('The office floor is charcoal grey');
-  assert.ok(!searchContext('auth flow', { sources: ['note'] }).some(h => /GitHub OAuth/.test(h.text)), 'keywords miss it');
+  assert.ok(!(await searchContext('auth flow', { sources: ['note'] })).some(h => /GitHub OAuth/.test(h.text)), 'keywords miss it');
 
   updateSettings({ embeddings: { provider: 'ollama', url, model: 'fake' } });
   const hits = await searchContextSmart('auth flow', { sources: ['note'] });

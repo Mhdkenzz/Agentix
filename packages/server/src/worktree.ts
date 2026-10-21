@@ -6,7 +6,8 @@
 // Discard resets the worktree. Removing the worker commits any leftover work to its branch (nothing is
 // lost) and deletes the worktree folder.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, realpathSync } from 'node:fs';
+import { copyFileSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, isAbsolute } from 'node:path';
 import type { Worktree } from '../../shared/src/types.ts';
 import { AGENTIX_HOME } from './store.ts';
@@ -16,11 +17,11 @@ const MAX_DIFF = 200_000;
 
 export class GitError extends Error {}
 
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   try {
     return execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env },
     }).replace(/\n$/, '');
   } catch (err: any) {
     throw new GitError(String(err?.stderr || err?.message || err).trim().split('\n').slice(-3).join(' '));
@@ -73,23 +74,43 @@ export interface WorktreeStatus {
   truncated: boolean;
 }
 
+/**
+ * Run git with a throw-away copy of the index, so looking at a worktree never changes the
+ * repository's own index. (A plain `git add --intent-to-add` would leave the user's checkout
+ * with new files marked as staged, just because someone opened the diff view.)
+ */
+function withTempIndex<T>(cwd: string, fn: (env: NodeJS.ProcessEnv) => T): T {
+  const found = tryGit(cwd, ['rev-parse', '--git-path', 'index']);
+  const source = found ? (isAbsolute(found) ? found : join(cwd, found)) : '';
+  const temp = join(tmpdir(), `agentix-index-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  try {
+    try { if (source) copyFileSync(source, temp); else writeFileSync(temp, ''); }
+    catch { writeFileSync(temp, ''); }
+    return fn({ GIT_INDEX_FILE: temp });
+  } finally {
+    try { rmSync(temp, { force: true }); } catch { /* best effort */ }
+  }
+}
+
 /** Everything the worker changed since `base`: committed and not, new files included. */
 export function worktreeStatus(wt: Worktree): WorktreeStatus {
-  git(wt.path, ['add', '-A', '--intent-to-add']);
-  const files = git(wt.path, ['diff', '--name-status', wt.base]).split('\n').filter(Boolean).map(l => {
-    const [status, ...rest] = l.split('\t');
-    return { status: status[0], path: rest.at(-1)! };
+  return withTempIndex(wt.path, (env) => {
+    git(wt.path, ['add', '-A', '--intent-to-add'], env);
+    const files = git(wt.path, ['diff', '--name-status', wt.base], env).split('\n').filter(Boolean).map(l => {
+      const [status, ...rest] = l.split('\t');
+      return { status: status[0], path: rest.at(-1)! };
+    });
+    const diff = git(wt.path, ['diff', wt.base], env);
+    return {
+      branch: wt.branch, repo: wt.repo, path: wt.path,
+      target: tryGit(wt.repo, ['rev-parse', '--abbrev-ref', 'HEAD']) ?? '?',
+      files,
+      commits: Number(git(wt.path, ['rev-list', '--count', `${wt.base}..HEAD`])) || 0,
+      stat: git(wt.path, ['diff', '--stat', wt.base], env),
+      diff: diff.length > MAX_DIFF ? diff.slice(0, MAX_DIFF) : diff,
+      truncated: diff.length > MAX_DIFF,
+    };
   });
-  const diff = git(wt.path, ['diff', wt.base]);
-  return {
-    branch: wt.branch, repo: wt.repo, path: wt.path,
-    target: tryGit(wt.repo, ['rev-parse', '--abbrev-ref', 'HEAD']) ?? '?',
-    files,
-    commits: Number(git(wt.path, ['rev-list', '--count', `${wt.base}..HEAD`])) || 0,
-    stat: git(wt.path, ['diff', '--stat', wt.base]),
-    diff: diff.length > MAX_DIFF ? diff.slice(0, MAX_DIFF) : diff,
-    truncated: diff.length > MAX_DIFF,
-  };
 }
 
 /** Commit everything in the worktree on its branch; false when there was nothing to commit. */
