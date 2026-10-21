@@ -55,7 +55,7 @@ export function History() {
 
   const agent = agentId ? agents[agentId] : undefined;
   const list = Object.values(agents).sort((a, b) => (stats[b.id]?.lastTs ?? b.createdAt) - (stats[a.id]?.lastTs ?? a.createdAt));
-  const pick = (id: string) => { const n = new URLSearchParams(params); id ? n.set('agent', id) : n.delete('agent'); setParams(n); setNote(''); };
+  const pick = (id: string) => { const n = new URLSearchParams(params); if (id) n.set('agent', id); else n.delete('agent'); setParams(n); setNote(''); };
 
   async function resume() {
     if (!agent || !resumeText.trim()) return;

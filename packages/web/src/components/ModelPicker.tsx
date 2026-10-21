@@ -1,7 +1,7 @@
 // Pick the model an agent runs with, from the models its CLI offers.
 // Short lists (Codex, Claude Code) are a dropdown; long ones (OpenCode, Pi: hundreds via OpenRouter) get a
 // provider filter and a search box. Codex models also take a reasoning level, sent as "<model>:<level>".
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type ModelList } from '../api.ts';
 
 const cache = new Map<string, Promise<ModelList>>();
@@ -19,24 +19,23 @@ export function ModelPicker({ kind, value, onChange, label = 'Model' }: { kind: 
   const [query, setQuery] = useState('');
   const request = useRef(0);
 
-  const fetchList = (refresh = false) => {
+  const fetchList = useCallback((refresh = false) => {
     if (!kind) return;
     const requestId = ++request.current;
     setLoading(true);
     load(kind, refresh).then(l => {
       if (requestId === request.current) { setList(l); setLoading(false); }
     });
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind]);
   useEffect(() => {
     setList(undefined); setGroup(''); setQuery('');
     request.current++;
     setLoading(false);
     if (!kind) return;
     fetchList();
-  }, [kind]);
+  }, [kind, fetchList]);
 
-  const models = list?.models ?? [];
+  const models = useMemo(() => list?.models ?? [], [list]);
   // "<model>:<effort>" only for models that list efforts (Codex); Pi ids can contain ":" themselves.
   const [base, effort] = useMemo(() => {
     const i = value.lastIndexOf(':');

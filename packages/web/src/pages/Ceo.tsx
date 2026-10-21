@@ -24,6 +24,8 @@ export function Ceo() {
   const lastEventId = useStore(s => s.lastEventId);
   const ceo = useMemo(() => Object.values(agents).find(a => a.role === 'ceo'), [agents]);
   const coordinator = useMemo(() => Object.values(agents).find(a => a.role === 'coordinator'), [agents]);
+  const ceoId = ceo?.id;
+  const coordinatorId = coordinator?.id;
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft] = useState('');
   const [listening, setListening] = useState(false);
@@ -34,9 +36,9 @@ export function Ceo() {
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (ceo) api.events(ceo.id).then(l => setHistory(ceo.id, l)).catch(() => {});
-    if (coordinator) api.events(coordinator.id).then(l => setHistory(coordinator.id, l)).catch(() => {});
-  }, [ceo?.id, coordinator?.id, setHistory]);
+    if (ceoId) api.events(ceoId).then(l => setHistory(ceoId, l)).catch(() => {});
+    if (coordinatorId) api.events(coordinatorId).then(l => setHistory(coordinatorId, l)).catch(() => {});
+  }, [ceoId, coordinatorId, setHistory]);
 
   const lines: Line[] = useMemo(() => {
     if (!ceo) return [];
@@ -204,7 +206,7 @@ function TeamSidebar({ agents }: { agents: Agent[] }) {
   return (
     <section className="team">
       <h3>What the CEO knows</h3>
-      {agents.sort((a, b) => order[a.role] - order[b.role] || a.createdAt - b.createdAt).map(a => (
+      {[...agents].sort((a, b) => order[a.role] - order[b.role] || a.createdAt - b.createdAt).map(a => (
         <div key={a.id} className="team-row">
           <AvatarThumb id={a.avatarId} size={30} />
           <div className="grow">
