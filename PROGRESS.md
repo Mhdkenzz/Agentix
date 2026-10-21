@@ -214,6 +214,25 @@ CI runs them after the dashboard build check and uploads `playwright-report/` wh
   each CLI gives (Codex catalog with reasoning levels, OpenCode and Pi provider lists with search, Claude aliases,
   Hermes' configured default) or typed by hand. Empty keeps the CLI's own default. `@@spawn ... model=` too.
 
+## Speed, safety and the missing basics (2026-10-21)
+- **Context search is fast now.** It used to re-read and re-count every file under every search folder on
+  every search: 2.7 s and a 2.7 s frozen event loop on a 31 MB repo. Files are chunked and counted once
+  (re-done only when the file changes), BM25 counts only the query's words, and the search yields to the
+  event loop every 32 documents. Same corpus now: 0.3 s cold, 27 ms warm, worst stall 50 ms.
+  `searchContext` is async now — every caller awaits it.
+- **Task ids never repeat.** `t1, t2, …` come from a counter kept in `tasks.json`; deleting a task no
+  longer hands its id to the next one.
+- **`GET /api/agents/:id/worktree` no longer touches your index.** It ran `git add --intent-to-add` in
+  the worktree, which staged your new files; it now uses a throw-away copy of the index.
+- **Notes say who wrote them.** Server, dashboard and the `[SHARED CONTEXT]` block mark a note from an
+  agent as "… (a teammate)", so a worker's note is never read as an instruction.
+- **CLI**: `agentix spawn` takes `--model` and `--worktree` / `--no-worktree`.
+- **Tightened the API's Origin check**: the origin must match the host the request came to (or a known
+  dev origin, `AGENTIX_DEV_ORIGINS`); another app on this machine can no longer drive the API.
+- **Tooling**: `packages/server/tsconfig.json` + `npm run typecheck` (server, CLI and dashboard),
+  ESLint (`npm run lint`), and CI now runs test → typecheck → lint → build → browser tests.
+- **README.md** at the repo root: what it is, quick start, CLI, layout, configuration, security.
+
 ## AGENTS.md role instructions (2026-10-16)
 - `packages/server/roles/AGENTS.md` says how each role should work: "Everyone", then CEO, Coordinator and Worker.
   Every agent gets "Everyone" plus its own section with its first prompt of each session (workers too, not only

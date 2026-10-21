@@ -15,9 +15,11 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Server + CLI tests
-        run: node --test packages/server/test/*.test.ts
-      - name: Dashboard typecheck
-        run: npm run typecheck -w @agentix/web
+        run: npm test
+      - name: Typecheck (server, CLI, dashboard)
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - name: Dashboard build
         run: npm run build
       - name: Committed dashboard build is up to date
