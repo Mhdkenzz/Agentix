@@ -32,7 +32,7 @@ async function api(path: string, method = 'GET', body?: unknown): Promise<any> {
   } catch {
     throw new CliError(`can't reach the agentix server at ${SERVER_URL}. Start it with: agentix server`);
   }
-  const data = await res.json().catch(() => ({}));
+  const data: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new CliError(data.error || `${method} ${path} failed with ${res.status}`);
   return data;
 }
@@ -162,17 +162,20 @@ async function cmdSpawn(args: string[]) {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
+    allowNegative: true,          // --no-worktree
     options: {
       role: { type: 'string', default: 'worker' },
       avatar: { type: 'string', default: 'random' },
       cwd: { type: 'string' },
       name: { type: 'string' },
+      model: { type: 'string' },
+      worktree: { type: 'boolean' },
       replace: { type: 'boolean', default: false },
     },
   });
   const [kind, ...rest] = positionals;
   if (!kind) {
-    throw new CliError('usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--name N] [--cwd DIR] [--replace] "<prompt>"');
+    throw new CliError('usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--name N] [--cwd DIR] [--model M] [--worktree|--no-worktree] [--replace] "<prompt>"');
   }
   const avatarId = values.avatar === 'random' ? 'random' : Number(values.avatar);
   const { agent: a } = await api('/api/agents', 'POST', {
@@ -183,6 +186,8 @@ async function cmdSpawn(args: string[]) {
     cwd: values.cwd ? resolve(values.cwd) : undefined,
     prompt: rest.join(' ') || undefined,
     replace: values.replace,
+    ...(values.model ? { model: values.model } : {}),
+    ...(typeof values.worktree === 'boolean' ? { worktree: values.worktree } : {}),
   });
   console.log(`${color(a.id)}✓ Spawned ${a.name} (${a.id})${RESET}`);
   console.log(`  kind: ${a.kind}  |  role: ${a.role}  |  avatar: ${a.avatarId}  |  status: ${a.status}  |  cwd: ${a.cwd}\n`);
@@ -230,7 +235,7 @@ const HELP = `\x1b[1mAgentix\x1b[0m — AI agent orchestration
     agentix server                          Start the server (AGENTIX_PORT, default 4317)
     agentix doctor                          Check node, store and installed agent CLIs
     agentix spawn <kind> [opts] "<prompt>"  Spawn an agent (kinds: codex, opencode, claude, pi, hermes, gemini, aider, goose)
-        --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --replace
+        --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --model M  --worktree|--no-worktree  --replace
     agentix ls                              List agents
     agentix logs <id> [-f]                  Show (or follow) an agent's events
     agentix steer <id> "<text>"             Interrupt if busy, then continue the session with <text>

@@ -14,7 +14,6 @@ const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', ['-C', cwd, '-c', 'user.name=e2e', '-c', 'user.email=e2e@localhost', ...args], { encoding: 'utf8' }).trim();
 
 let repo = '';
-let vega = '';
 
 test('a worker in a git repo gets its own branch; its task moves to review; its tokens are counted', async ({ page, request }) => {
   expect((await request.put('/api/settings', { data: { setupDone: true } })).ok()).toBeTruthy();
@@ -27,7 +26,6 @@ test('a worker in a git repo gets its own branch; its task moves to review; its 
   const res = await request.post('/api/agents', { data: { kind: 'codex', name: 'Vega', cwd: repo } });
   expect(res.status()).toBe(201);
   const { agent } = await res.json();
-  vega = agent.id;
   expect(agent.worktree.branch).toMatch(/^agentix\/vega-/);
   expect(agent.cwd).not.toBe(repo);
 

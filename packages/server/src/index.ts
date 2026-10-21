@@ -47,13 +47,34 @@ export function isLocalHost(host: string | undefined): boolean {
   return !host || LOCAL_HOST.test(host);
 }
 
-/** Browsers send Origin on cross-site and on most non-GET requests; it must be our own page (or the Vite dev server). */
-export function isLocalOrigin(origin: string | undefined): boolean {
+/**
+ * The origins allowed to drive the API besides the server's own: the Vite dev server, which proxies
+ * /api to us, and anything else the user lists in AGENTIX_DEV_ORIGINS (comma separated).
+ * A dev server on another port (Vite moves to the next free one) has to be added here.
+ */
+const DEV_ORIGINS = (process.env.AGENTIX_DEV_ORIGINS
+  ?? 'http://localhost:5173,http://127.0.0.1:5173,http://[::1]:5173')
+  .split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
+
+/**
+ * Browsers send Origin on cross-site requests; it must be our own page.
+ *
+ * "Is it local?" is the wrong question: any other app on this machine (a dev server on :3000, a
+ * browser extension page) is a different site and must not be able to create agents, set CLI paths
+ * or steer them. So the Origin has to match the host the request was made to, or be a dev origin
+ * we know about. No Origin at all means a non-browser client (the CLI, curl) on this machine.
+ */
+export function isLocalOrigin(origin: string | undefined, host?: string): boolean {
   if (!origin) return true;
-  try {
-    const u = new URL(origin);
-    return (u.protocol === 'http:' || u.protocol === 'https:') && LOCAL_HOST.test(u.host);
-  } catch { return false; }
+  let u: URL;
+  try { u = new URL(origin); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const key = `${u.protocol}//${u.host}`.toLowerCase();
+  if (host) {
+    // The dashboard this server serves: same host and port the request came in on.
+    if (key === `http://${host.toLowerCase()}`) return true;
+  }
+  return DEV_ORIGINS.includes(key);
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown) {
@@ -155,7 +176,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
     // any other website open in the browser from creating or steering agents (no CORS headers are sent).
     if (!isLocalHost(req.headers.host)) return sendJson(res, 403, { error: 'Forbidden host' });
     const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
-    if (isApi && !isLocalOrigin(req.headers.origin)) return sendJson(res, 403, { error: 'Forbidden origin' });
+    if (isApi && !isLocalOrigin(req.headers.origin, req.headers.host)) return sendJson(res, 403, { error: 'Forbidden origin' });
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     try {

@@ -21,9 +21,9 @@ const base = `http://127.0.0.1:${port}`;
 const env = { ...process.env, AGENTIX_URL: base };
 after(async () => { await sessionManager.shutdown(); server.closeAllConnections(); server.close(); });
 
-const json = async (path: string, method = 'GET', body?: unknown) => {
+const json = async (path: string, method = 'GET', body?: any) => {
   const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await r.json() as any };
 };
 
 /** Collect SSE messages (raw `event:` names + parsed data) until `done` says stop. */
@@ -65,7 +65,7 @@ test('REST errors: 404, 400, 409', async () => {
 test('malformed URL encoding returns 400 without taking down the server', async () => {
   const r = await fetch(base + '/api/%');
   assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /Malformed URL encoding/);
+  assert.match((await r.json() as any).error, /Malformed URL encoding/);
   assert.equal((await json('/api/agents')).status, 200, 'server remains available');
 });
 
