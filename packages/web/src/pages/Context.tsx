@@ -24,7 +24,8 @@ export function Context() {
   const load = () => api.context().then(i => { setInfo(i); return i; }).catch(e => { setError(String(e.message ?? e)); return undefined; });
   useEffect(() => { load().then(i => i && setBrief(i.brief)); }, []);
   // New @@remember notes arrive as agent events; refresh the list now and then.
-  useEffect(() => { const t = setTimeout(load, 400); return () => clearTimeout(t); }, [Math.floor(lastEventId / 10)]);
+  const eventBucket = Math.floor(lastEventId / 10);
+  useEffect(() => { const t = setTimeout(load, 400); return () => clearTimeout(t); }, [eventBucket]);
 
   useEffect(() => {
     if (!q.trim()) { setHits(undefined); return; }
@@ -38,6 +39,8 @@ export function Context() {
   }
   const saveFolders = (paths: string[]) => act(async () => setServerSettings(await api.saveSettings({ contextPaths: paths })), 'folders');
   const who = (from: string) => from === 'user' ? 'you' : live[from]?.name ?? archived[from]?.name ?? from;
+  // Notes written by an agent are marked, so kenz can tell his own notes from a worker's.
+  const noteWho = (from: string) => from === 'user' ? 'you' : `${who(from)} (teammate)`;
 
   if (!info) return <div className="page"><h1>Shared context</h1><p className="muted">{error || 'Loading…'}</p></div>;
 
@@ -80,7 +83,7 @@ export function Context() {
             <div key={n.id} className="note">
               <div className="grow">
                 <div className="note-text">{n.text}</div>
-                <div className="muted small">{who(n.from)} · {new Date(n.ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</div>
+                <div className="muted small">{noteWho(n.from)} · {new Date(n.ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</div>
               </div>
               <button className="icon-btn" title="Delete note" onClick={() => act(() => api.deleteNote(n.id))}>✕</button>
             </div>
@@ -117,7 +120,7 @@ export function Context() {
           {hits?.length === 0 && <div className="muted small pad">Nothing matches.</div>}
           {hits?.map((h, i) => (
             <div key={i} className={`hit hit-${h.source}`}>
-              <div className="hit-meta"><span className="hit-src">{SOURCE_LABEL[h.source]}</span><span className="mono">{h.source === 'note' ? h.title : h.source === 'output' ? who(h.agentId ?? '') : h.title}</span><span className="muted">score {h.score}</span></div>
+              <div className="hit-meta"><span className="hit-src">{SOURCE_LABEL[h.source]}</span><span className="mono">{h.source === 'note' ? `note by ${noteWho(h.agentId ?? 'user')}` : h.source === 'output' ? who(h.agentId ?? '') : h.title}</span><span className="muted">score {h.score}</span></div>
               <div className="hit-text">{h.text}</div>
             </div>
           ))}

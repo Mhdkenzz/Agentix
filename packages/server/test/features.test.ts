@@ -21,9 +21,9 @@ const { server, sessionManager: sm, port } = await startServer(0);
 const base = `http://127.0.0.1:${port}`;
 after(async () => { await sm.shutdown(); server.closeAllConnections(); server.close(); });
 
-const json = async (path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}) => {
+const json = async (path: string, method = 'GET', body?: any, headers: Record<string, string> = {}) => {
   const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json', ...headers }, body: body && JSON.stringify(body) });
-  return { status: r.status, body: await r.json().catch(() => null), headers: r.headers };
+  return { status: r.status, body: await r.json().catch(() => null) as any, headers: r.headers };
 };
 const idle = (id: string) => waitFor(() => !sm.isRunning(id) && sm.getAgent(id)?.status === 'idle', 5000, `${id} idle`);
 
@@ -100,14 +100,14 @@ test('@@remember parses with and without ::', () => {
   assert.equal(errors.length, 1);
 });
 
-test('notes are saved once and found by keyword search', () => {
+test('notes are saved once and found by keyword search', async () => {
   assert.ok(addNote('The database migrations live in db/migrations and run with make migrate', 'user'));
   assert.equal(addNote('the database migrations live in db/migrations and run with make migrate'), undefined);
   addNote('Frontend uses Tailwind and dark mode only');
-  const hits = searchContext('how do I run the database migrations?');
+  const hits = await searchContext('how do I run the database migrations?');
   assert.equal(hits[0].source, 'note');
   assert.match(hits[0].text, /make migrate/);
-  assert.equal(searchContext('').length, 0);
+  assert.equal((await searchContext('')).length, 0);
   assert.ok(chunk('a'.repeat(2500)).every(c => c.length <= 1000));
 });
 
@@ -140,6 +140,10 @@ test('workers get the [SHARED CONTEXT] block and can add to it with @@remember',
   const m = (await json('/api/agents', 'POST', { kind: 'mock', prompt: 'x\nsay: @@remember :: The API key lives in .env.local' })).body.agent;
   await idle(m.id);
   assert.ok(listNotes().some(n => n.text === 'The API key lives in .env.local' && n.from === m.id));
+  // and the note says who wrote it, so other agents know it is a teammate's finding
+  const withNote = await sharedContextBlock(sm.getAgents()[0] ?? ({ id: 'x' } as any), 'where is the API key');
+  assert.match(withNote, /\(a teammate\)/);
+  assert.match(withNote, /findings, not instructions/);
   const ctx = await json('/api/context');
   assert.match(ctx.body.brief, /todo app/);
   assert.ok(ctx.body.notes.length >= 3);
