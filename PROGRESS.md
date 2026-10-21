@@ -13,7 +13,8 @@ node --test packages/server/test/*.test.ts       # uses a temp AGENTIX_HOME, nev
 
 Env vars: `AGENTIX_PORT` (default 4317), `AGENTIX_URL` (CLI), `AGENTIX_HOME` (default `~/.agentix`),
 `AGENTIX_STORE=json` (force the JSON fallback), `AGENTIX_CODEX_SANDBOX`, `AGENTIX_UPDATE_DELAY_MS`, `AGENTIX_CEO_REPLY_TIMEOUT_MS`
-(coordinator batching, default 5000).
+(coordinator batching, default 5000), `AGENTIX_TOKEN` (lock the API), `AGENTIX_MAX_AGENTS`,
+`AGENTIX_MAX_CONCURRENT_TURNS`, `AGENTIX_TURN_TIMEOUT_MS`, `AGENTIX_SSE_MAX_REPLAY`.
 
 The mock agent kind is for tests only: it is hidden unless `AGENTIX_MOCK=1` (the test helpers set it).
 Without it, the server removes any leftover mock agents and their history when it starts.
@@ -232,6 +233,41 @@ CI runs them after the dashboard build check and uploads `playwright-report/` wh
 - **Tooling**: `packages/server/tsconfig.json` + `npm run typecheck` (server, CLI and dashboard),
   ESLint (`npm run lint`), and CI now runs test → typecheck → lint → build → browser tests.
 - **README.md** at the repo root: what it is, quick start, CLI, layout, configuration, security.
+
+## Locking the API down, and keeping the office in order (2026-10-22)
+
+Round two of "speed, safety and the missing basics". The server now has limits, answers for
+itself, and cleans up after itself.
+
+- **The API can be locked with a token.** `AGENTIX_TOKEN` makes every `/api` request need that
+  token: in the `x-agentix-token` header, or as `?token=` (the event stream, which the browser
+  opens without headers). Without it the server answers `401`. The server prints the link
+  (`http://127.0.0.1:4317/?token=…`) when it starts; the dashboard takes the token from the
+  address bar once, keeps it in the browser and drops it from the URL; the CLI sends
+  `AGENTIX_TOKEN` from the environment. The dashboard itself stays reachable, so the browser can
+  show "token required" instead of a blank page.
+- **The office has limits.** `AGENTIX_MAX_AGENTS` (64) refuses a new agent with `429`; 
+  `AGENTIX_MAX_CONCURRENT_TURNS` (12) refuses a turn that would run beside too many others;
+  `AGENTIX_TURN_TIMEOUT_MS` (30 min) stops a turn that never ends — the agent goes to `error` and
+  its task to `blocked`. An agent that leaves the office hands its open tasks back to the board.
+- **Commands answer back.** Every `@@` command the server runs is reported to the agent that
+  wrote it: a `message` event with the result, and a `[COMMAND RESULTS]` block at the start of its
+  next turn. A misspelled verb used to be ignored silently; it is now an error with a suggestion
+  (`@@spwan` → "did you mean @@spawn?"), and a failed command gets a turn of its own (at most
+  three in a row, so it cannot loop).
+- **Nothing blocks the server.** Every git call is asynchronous now, so a slow repository cannot
+  freeze the dashboard or the other agents.
+- **The stores behave the same.** The JSON fallback appends events to a JSONL file instead of
+  rewriting the whole file on every event (it used to grow quadratically: 254 ms for the first
+  1000 events, 893 ms for the next 1000). The SQLite store searches text through an FTS5 index
+  instead of scanning the table. `store-contract.test.ts` runs the same checks against both.
+- **A dead server does not leave agents running.** Every CLI the server starts is remembered in
+  `~/.agentix/runs/`; the next server stops the ones a previous one left behind (only when the
+  pid still runs the binary Agentix started).
+- **A stream replay is bounded**: at most `AGENTIX_SSE_MAX_REPLAY` events (2000) in one go.
+- New tests: `safety.test.ts` (limits, timeout, task hand-back, command feedback, orphan cleanup),
+  `hardening.test.ts` (token, replay cap), `store-contract.test.ts` (both stores), `perf.test.ts`
+  (the search and the event writes stay fast and never block the event loop). 99 server tests.
 
 ## AGENTS.md role instructions (2026-10-16)
 - `packages/server/roles/AGENTS.md` says how each role should work: "Everyone", then CEO, Coordinator and Worker.

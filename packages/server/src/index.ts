@@ -16,11 +16,28 @@ import { listTasks, clearTasks } from './tasks.ts';
 import { pruneOldEvents } from './retention.ts';
 import { scanClis } from './setup.ts';
 import { historyDir } from './history.ts';
+import { killOrphanRuns } from './procs.ts';
 import { AGENTIX_HOME } from './store.ts';
 
 export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
 export const HOST = '127.0.0.1';
 const SSE_DEFAULT_REPLAY = 100;
+/** No client gets more than this many events in one replay. */
+const sseMaxReplay = () => Math.max(1, Number(process.env.AGENTIX_SSE_MAX_REPLAY) || 2_000);
+
+/**
+ * When AGENTIX_TOKEN is set, the API needs it: in the x-agentix-token header, or as ?token=
+ * for the event stream (a browser's EventSource cannot send headers). Without it the server
+ * answers every API request with 401.
+ */
+const API_TOKEN = process.env.AGENTIX_TOKEN || '';
+
+function tokenOk(req: IncomingMessage, url: URL): boolean {
+  if (!API_TOKEN) return true;
+  const header = req.headers['x-agentix-token'];
+  const given = (Array.isArray(header) ? header[0] : header) || url.searchParams.get('token') || '';
+  return given === API_TOKEN;
+}
 
 async function requireAvailableModel(kind: string, value: unknown): Promise<string | undefined> {
   const model = cleanModel(value);
@@ -152,7 +169,12 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
 
   const resume = req.headers['last-event-id'] ?? url.searchParams.get('after');
   const after = resume != null ? Number(resume) || 0 : 0;
-  const limit = resume != null ? -1 : Number(url.searchParams.get('tail') ?? SSE_DEFAULT_REPLAY);
+  const asked = Number(url.searchParams.get('tail') ?? SSE_DEFAULT_REPLAY);
+  // A replay is bounded: a client cannot ask for the whole database in one go.
+  const max = sseMaxReplay();
+  const limit = resume != null
+    ? max
+    : Math.min(Math.max(Number.isFinite(asked) ? asked : SSE_DEFAULT_REPLAY, 0), max);
   const history = agentId ? store.getAgentEvents(agentId, after, limit) : store.getEvents(after, limit);
   for (const e of history) writeSSE(res, e);
 
@@ -177,6 +199,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
     if (!isLocalHost(req.headers.host)) return sendJson(res, 403, { error: 'Forbidden host' });
     const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
     if (isApi && !isLocalOrigin(req.headers.origin, req.headers.host)) return sendJson(res, 403, { error: 'Forbidden origin' });
+    if (isApi && !tokenOk(req, url)) return sendJson(res, 401, { error: 'Token required' });
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     try {
@@ -289,7 +312,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (method === 'POST') {
           const b = await readJson(req);
           const model = await requireAvailableModel(b.kind, b.model);
-          const agent = sm.createAgent(b.kind, {
+          const agent = await sm.createAgent(b.kind, {
             name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace, model,
             ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
           });
@@ -325,9 +348,9 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           return sendJson(res, 200, { ok: true });
         }
         if (action === 'worktree') {
-          if (!sub && method === 'GET') return sendJson(res, 200, sm.getWorktree(id));
-          if (sub === 'merge' && method === 'POST') return sendJson(res, 200, sm.mergeWorktree(id));
-          if (sub === 'discard' && method === 'POST') { sm.discardWorktree(id); return sendJson(res, 200, { ok: true }); }
+          if (!sub && method === 'GET') return sendJson(res, 200, await sm.getWorktree(id));
+          if (sub === 'merge' && method === 'POST') return sendJson(res, 200, await sm.mergeWorktree(id));
+          if (sub === 'discard' && method === 'POST') { await sm.discardWorktree(id); return sendJson(res, 200, { ok: true }); }
         }
         if (action === 'session' && method === 'POST') {
           const b = await readJson(req);
@@ -361,10 +384,15 @@ export function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sess
         ? new Error(`port ${port} is already in use (another agentix server?). Set AGENTIX_PORT to use a different one.`)
         : err);
     });
-    server.listen(port, HOST, () => {
+    server.listen(port, HOST, async () => {
       // Agents that were mid-turn when the server last stopped can't still be running.
       // (Only after binding, so a second server that fails to start can't touch the live one's agents.)
       store.resetBusyAgents();
+      // The CLIs of a server that died are still running: stop them before starting new work.
+      try {
+        const stopped = await killOrphanRuns();
+        if (stopped) console.log(`agentix: stopped ${stopped} agent CLI(s) left behind by a previous server`);
+      } catch { /* best effort */ }
       // Old events leave the database now and every 6 hours (the history files keep them).
       pruneOldEvents();
       const prune = setInterval(pruneOldEvents, 6 * 3600_000);

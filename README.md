@@ -10,6 +10,9 @@ board, and get their own git worktree so two workers never fight over the same f
 Everything runs on your machine. The server listens on `127.0.0.1` only, keeps its data in
 `~/.agentix`, and never calls a model API itself — the agent CLIs do that.
 
+Node 22.18 or newer (24 is what CI uses) — the server runs `.ts` files directly and uses
+`node:sqlite` when the Node build has it.
+
 ---
 
 ## Quick start
@@ -54,7 +57,8 @@ fails.
 overwrite each other. Diff, merge or discard from the dashboard.
 
 **Permanent history.** Every event is in SQLite and in plain JSONL files under `~/.agentix/history/`.
-Removing an agent archives it; its history stays searchable.
+Removing an agent archives it; its history stays searchable. Text search runs on an index, not on a
+full scan, and a busy agent does not slow the server down with a write per event.
 
 ---
 
@@ -131,9 +135,20 @@ Environment variables:
 | `AGENTIX_HOME` | data directory (default `~/.agentix`) |
 | `AGENTIX_WEB_DIST` | folder the dashboard is served from |
 | `AGENTIX_STORE=json` | force the JSON store instead of SQLite |
+| `AGENTIX_TOKEN` | require this token on every API request (see Security) |
 | `AGENTIX_<KIND>_BIN` | path to one agent CLI (e.g. `AGENTIX_CODEX_BIN`) |
 | `AGENTIX_UPDATE_DELAY_MS` | how long coordinator updates are batched (default 5000) |
 | `AGENTIX_CEO_REPLY_TIMEOUT_MS` | how long the CEO waits for the coordinator (default 30000) |
+| `AGENTIX_MAX_AGENTS` | how many agents may be in the office at once (default 64) |
+| `AGENTIX_MAX_CONCURRENT_TURNS` | how many turns may run at the same time (default 12) |
+| `AGENTIX_TURN_TIMEOUT_MS` | when a turn is stopped for running too long (default 1800000 = 30 min) |
+| `AGENTIX_SSE_MAX_REPLAY` | how many events one event-stream replay may contain (default 2000) |
+| `AGENTIX_KILL_GRACE_MS` | how long an interrupted CLI may take to exit before it is killed (default 3000) |
+
+The server also keeps itself out of trouble: a turn that runs too long is stopped (the agent goes to
+`error`, its task to `blocked`), too many agents or turns at once is refused with a clear error, an
+agent that leaves the office hands its open tasks back to the board, and the CLIs of a server that
+died are stopped when the next one starts.
 
 ---
 
@@ -143,6 +158,12 @@ The API answers only this machine: a `Host` other than `localhost`/`127.0.0.1` g
 DNS rebinding), and so does any `/api` request with a foreign `Origin`. No CORS headers are sent,
 so a web page you have open in the same browser cannot spawn or steer agents. The server binds to
 the loopback interface only. Agent CLIs keep their own credentials; Agentix never stores them.
+
+Set `AGENTIX_TOKEN` to lock the API down further: every `/api` request then needs that token, in
+the `x-agentix-token` header or as `?token=` (the event stream, which the browser opens without
+headers, takes the query form). Without it the server answers `401`. The server prints the link
+with the token when it starts; the dashboard takes it from the address bar once and keeps it in
+the browser.
 
 Data on disk (`~/.agentix`): the SQLite database, `context/` (brief, notes, embedding cache),
 `history/` (JSONL event log), `worktrees/` and `tasks.json`.

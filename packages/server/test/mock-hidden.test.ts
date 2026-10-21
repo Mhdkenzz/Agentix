@@ -9,7 +9,7 @@ import { store } from '../src/store.ts';
 
 test('mock is hidden without AGENTIX_MOCK=1 and leftover mock agents are removed at startup', async () => {
   const sm = new SessionManager(new EventBus());
-  const old = sm.createAgent('mock', { prompt: 'hello' });
+  const old = await sm.createAgent('mock', { prompt: 'hello' });
   await waitFor(() => !sm.isRunning(old.id), 5000, 'mock turn done');
   delete process.env.AGENTIX_MOCK;
   try {

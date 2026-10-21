@@ -29,6 +29,7 @@ const PAGES = [['/', 'Office'], ['/ceo', 'CEO'], ['/agents', 'Agents'], ['/tasks
 export function TopBar() {
   const agents = useStore(s => s.agents);
   const connected = useStore(s => s.connected);
+  const needsToken = useStore(s => s.needsToken);
   const select = useStore(s => s.select);
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
   const navigate = useNavigate();
@@ -58,6 +59,11 @@ export function TopBar() {
         <span className="c-busy" title="busy">● {busy} busy</span>
         {waiting > 0 && <span className="c-wait">● {waiting} waiting</span>}
         {errors > 0 && <span className="c-err">● {errors} error</span>}
+        {needsToken && (
+          <span className="c-err" title="This server needs an API token. Open the dashboard with ?token=... — the server prints the link when it starts.">
+            token required
+          </span>
+        )}
         <span className={connected ? 'c-on' : 'c-off'} title={connected ? 'live' : 'reconnecting to the server…'}>{connected ? 'live' : 'offline'}</span>
       </div>
       <div className="session-controls">

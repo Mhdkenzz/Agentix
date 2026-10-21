@@ -12,10 +12,36 @@ export class ApiError extends Error {
   constructor(status: number, message: string, data?: any) { super(message); this.status = status; this.data = data; }
 }
 
+const TOKEN_KEY = 'agentix.token';
+
+/**
+ * The API token, for a server that runs with AGENTIX_TOKEN. It comes from the address bar the
+ * first time (?token=...) and is kept in the browser; the token is then removed from the URL,
+ * so it does not end up in the history or in a screenshot of the address bar.
+ */
+function readToken(): string {
+  try {
+    const url = new URL(window.location.href);
+    const fromUrl = url.searchParams.get('token');
+    if (fromUrl) {
+      localStorage.setItem(TOKEN_KEY, fromUrl);
+      url.searchParams.delete('token');
+      history.replaceState(null, '', url.toString());
+      return fromUrl;
+    }
+    return localStorage.getItem(TOKEN_KEY) ?? '';
+  } catch { return ''; }
+}
+
+const TOKEN = readToken();
+
 async function call<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    headers: {
+      ...(TOKEN ? { 'x-agentix-token': TOKEN } : {}),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -108,7 +134,8 @@ const EVENT_TYPES = ['agent.created', 'agent.updated', 'agent.removed', 'output'
  * Last-Event-ID, so the server replays whatever we missed.
  */
 export function connectStream(after: number, onEvent: (e: AgentEvent) => void, onState: (connected: boolean) => void): () => void {
-  const es = new EventSource(`/api/stream?after=${after}`);
+  // An EventSource cannot send headers, so the token goes in the query.
+  const es = new EventSource(`/api/stream?after=${after}${TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : ''}`);
   const handler = (m: MessageEvent) => {
     try { onEvent(JSON.parse(m.data)); } catch { /* ignore malformed */ }
   };

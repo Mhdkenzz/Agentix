@@ -30,7 +30,7 @@ test('a worker gets its AGENTS.md guidance on its first turn only; kenz\'s copy 
   rmSync(join(TMP, 'codex.args'), { force: true });
   const sm = new SessionManager(new EventBus());
   try {
-    const w = sm.createAgent('codex', { name: 'Rune', cwd: WORK, prompt: 'first' });
+    const w = await sm.createAgent('codex', { name: 'Rune', cwd: WORK, prompt: 'first' });
     await waitFor(() => !sm.isRunning(w.id) && sm.getAgent(w.id)?.nativeSessionId, 5000, 'first turn');
     await sm.steerAgent(w.id, 'second');
     await waitFor(() => !sm.isRunning(w.id) && readFileSync(join(TMP, 'codex.args'), 'utf8').includes('second'), 5000, 'second turn');

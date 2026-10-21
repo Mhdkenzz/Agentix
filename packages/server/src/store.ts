@@ -1,16 +1,21 @@
 // Agentix — SQLite store (node:sqlite), with a JSON-file fallback behind the same interface
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import type { Agent, AgentEvent, Status, Usage } from '../../shared/src/types.ts';
 import { withHistory } from './history.ts';
 
 /** Data directory: $AGENTIX_HOME, else ~/.agentix. Tests point this at a temp dir. */
 export const AGENTIX_HOME = process.env.AGENTIX_HOME || join(homedir(), '.agentix');
-const DB_PATH = join(AGENTIX_HOME, 'agentix.db');
-const JSON_PATH = join(AGENTIX_HOME, 'agentix.json');
 
 mkdirSync(AGENTIX_HOME, { recursive: true });
+
+/** The database file (SQLite store). */
+const dbPath = (home: string) => join(home, 'agentix.db');
+/** The agents file (JSON fallback). */
+const jsonPath = (home: string) => join(home, 'agentix.json');
+/** The events file (JSON fallback): append-only, one event per line. */
+const jsonEventsPath = (home: string) => join(home, 'agentix-events.jsonl');
 
 type NewEvent = Omit<AgentEvent, 'id' | 'ts' | 'agentId'>;
 
@@ -60,9 +65,31 @@ export interface EventSearch {
 
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
 
+/** One JSON event per line, read back into events. A torn last line is skipped. */
+function readEventLines(path: string): AgentEvent[] {
+  let raw = '';
+  try { raw = readFileSync(path, 'utf-8'); } catch { return []; }
+  const out: AgentEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e && typeof e.id === 'number') out.push(e);
+    } catch { /* a torn line (the server died mid-write) */ }
+  }
+  return out;
+}
+
+/** Write the whole events file (used when events are deleted, not appended). */
+function writeEventLines(path: string, events: AgentEvent[]): void {
+  try {
+    writeFileSync(path, events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
+  } catch { /* reported by the caller */ }
+}
+
 // ---------- SQLite ----------
 
-function openSqlite(): IStore | null {
+function openSqlite(home: string): IStore | null {
   let DatabaseSync: any;
   try {
     // Loaded lazily so Node versions without node:sqlite fall back to JSON.
@@ -72,7 +99,7 @@ function openSqlite(): IStore | null {
   }
   if (!DatabaseSync) return null;
 
-  const db = new DatabaseSync(DB_PATH);
+  const db = new DatabaseSync(dbPath(home));
   db.exec(`
     PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS agents (
@@ -108,6 +135,36 @@ function openSqlite(): IStore | null {
   if (!columns.has('worktree')) db.exec('ALTER TABLE agents ADD COLUMN worktree TEXT');
   if (!columns.has('model')) db.exec('ALTER TABLE agents ADD COLUMN model TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS events_type_ts ON events(type, ts)');
+
+  // Full-text search over the event text. FTS5 with the trigram tokenizer keeps the old
+  // behaviour (case-insensitive substring, with % and _ literal) but finds rows through an
+  // index instead of scanning the whole table. An SQLite build without FTS5 falls back to LIKE.
+  // remove_diacritics 0 keeps it byte-for-byte equal to LIKE, which does not fold accents.
+  let fts = false;
+  try {
+    const existing = db.prepare("SELECT sql FROM sqlite_master WHERE name='events_fts'").get() as any;
+    if (existing && !/remove_diacritics 0/.test(existing.sql || '')) {
+      db.exec('DROP TABLE events_fts');
+    }
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(text, content='events', content_rowid='id', tokenize='trigram remove_diacritics 0')`);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS events_fts_ai AFTER INSERT ON events BEGIN
+        INSERT INTO events_fts(rowid, text) VALUES (new.id, new.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_ad AFTER DELETE ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, text) VALUES ('delete', old.id, old.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_au AFTER UPDATE OF text ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, text) VALUES ('delete', old.id, old.text);
+        INSERT INTO events_fts(rowid, text) VALUES (new.id, new.text);
+      END;
+    `);
+    const indexed = Number((db.prepare('SELECT COUNT(*) AS n FROM events_fts').get() as any).n);
+    const total = Number((db.prepare('SELECT COUNT(*) AS n FROM events').get() as any).n);
+    // An index built for an older database is filled once, here.
+    if (indexed === 0 && total > 0) db.exec("INSERT INTO events_fts(events_fts) VALUES ('rebuild')");
+    fts = true;
+  } catch { fts = false; }
 
   const toAgent = (r: any): Agent => ({
     id: r.id, name: r.name, kind: r.kind, role: r.role, avatarId: r.avatarId,
@@ -183,11 +240,20 @@ function openSqlite(): IStore | null {
     searchEvents: f => {
       const where: string[] = [];
       const args: any[] = [];
-      if (f.q) { where.push("text LIKE ? ESCAPE '\\'"); args.push(`%${f.q.replace(/[\\%_]/g, m => '\\' + m)}%`); }
-      if (f.agentId) { where.push('agentId = ?'); args.push(f.agentId); }
-      if (f.types?.length) { where.push(`type IN (${f.types.map(() => '?').join(',')})`); args.push(...f.types); }
-      if (f.before) { where.push('id < ?'); args.push(f.before); }
-      const sql = `SELECT * FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`;
+      if (f.q) {
+        if (fts && f.q.length >= 3) {
+          // A quoted phrase: the whole query as one string of trigrams.
+          where.push('e.id IN (SELECT rowid FROM events_fts WHERE events_fts MATCH ?)');
+          args.push(`"${f.q.replace(/"/g, '""')}"`);
+        } else {
+          where.push("e.text LIKE ? ESCAPE '\\'");
+          args.push(`%${f.q.replace(/[\\%_]/g, m => '\\' + m)}%`);
+        }
+      }
+      if (f.agentId) { where.push('e.agentId = ?'); args.push(f.agentId); }
+      if (f.types?.length) { where.push(`e.type IN (${f.types.map(() => '?').join(',')})`); args.push(...f.types); }
+      if (f.before) { where.push('e.id < ?'); args.push(f.before); }
+      const sql = `SELECT e.* FROM events e ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.id DESC LIMIT ?`;
       return db.prepare(sql).all(...args, f.limit ?? 200).map(toEvent);
     },
     eventStats: () => q.stats.all().map((r: any) => ({ agentId: r.agentId, count: Number(r.n), lastTs: Number(r.lastTs) })),
@@ -201,16 +267,24 @@ function openSqlite(): IStore | null {
   };
 
   // One-time import of the JSON store written by earlier versions.
-  if (existsSync(JSON_PATH) && (q.countAgents.get() as any).n === 0) {
+  const legacyPath = jsonPath(home);
+  const legacyEventsPath = jsonEventsPath(home);
+  if (existsSync(legacyPath) && (q.countAgents.get() as any).n === 0) {
     try {
-      const data = JSON.parse(readFileSync(JSON_PATH, 'utf-8'));
+      const data = JSON.parse(readFileSync(legacyPath, 'utf-8'));
+      const imported = [...(Array.isArray(data.events) ? data.events : []), ...readEventLines(legacyEventsPath)]
+        .sort((a: any, b: any) => a.id - b.id);
+      const seen = new Set<number>();
       db.exec('BEGIN');
       for (const a of data.agents ?? []) s.createAgent(a);
-      for (const e of data.events ?? []) {
+      for (const e of imported) {
+        if (seen.has(e.id)) continue;
+        seen.add(e.id);
         q.insertEventWithId.run(e.id, e.agentId, e.type, e.ts, e.from ?? null, e.text ?? null, e.data !== undefined ? JSON.stringify(e.data) : null);
       }
       db.exec('COMMIT');
-      renameSync(JSON_PATH, JSON_PATH + '.imported');
+      renameSync(legacyPath, legacyPath + '.imported');
+      if (existsSync(legacyEventsPath)) renameSync(legacyEventsPath, legacyEventsPath + '.imported');
     } catch {
       try { db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
     }
@@ -221,24 +295,40 @@ function openSqlite(): IStore | null {
 
 // ---------- JSON fallback ----------
 
-function openJson(): IStore {
+/**
+ * The fallback for Node versions without node:sqlite. The agents live in one small file, the
+ * events in an append-only file next to it: appending an event stays O(1), where rewriting
+ * every event on every change grew quadratically with the number of events.
+ */
+function openJson(home: string): IStore {
+  const path = jsonPath(home);
+  const eventsPath = jsonEventsPath(home);
   let agents: Agent[] = [];
   let events: AgentEvent[] = [];
   let nextEventId = 1;
   try {
-    if (existsSync(JSON_PATH)) {
-      const data = JSON.parse(readFileSync(JSON_PATH, 'utf-8'));
+    if (existsSync(path)) {
+      const data = JSON.parse(readFileSync(path, 'utf-8'));
       agents = data.agents || [];
-      events = data.events || [];
-      nextEventId = data.nextEventId || events.reduce((m, e) => Math.max(m, e.id), 0) + 1;
+      nextEventId = data.nextEventId || 1;
+      if (Array.isArray(data.events)) {
+        // The old format kept the events in the same file: move them to the append-only one.
+        events = data.events;
+        nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, e.id), 0) + 1);
+        writeEventLines(eventsPath, events);
+      }
     }
   } catch { /* fresh start */ }
+  if (!events.length) {
+    events = readEventLines(eventsPath);
+    nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, e.id), 0) + 1);
+  }
 
   // Coalesce writes: an agent can emit dozens of events per second.
   let saveTimer: NodeJS.Timeout | undefined;
   const flush = () => {
     saveTimer = undefined;
-    try { writeFileSync(JSON_PATH, JSON.stringify({ agents, events, nextEventId })); } catch { /* ignore */ }
+    try { writeFileSync(path, JSON.stringify({ agents, nextEventId })); } catch { /* ignore */ }
   };
   const save = () => { if (!saveTimer) saveTimer = setTimeout(flush, 200); };
   process.on('exit', () => { if (saveTimer) { clearTimeout(saveTimer); flush(); } });
@@ -265,9 +355,10 @@ function openJson(): IStore {
     removeAgent: id => {
       agents = agents.filter(a => a.id !== id);
       events = events.filter(e => e.agentId !== id);
+      writeEventLines(eventsPath, events);
       save();
     },
-    reset: () => { agents = []; events = []; nextEventId = 1; save(); },
+    reset: () => { agents = []; events = []; nextEventId = 1; writeEventLines(eventsPath, events); save(); },
     getEvents: (after = 0, limit = -1) => tail(events.filter(e => e.id > after), limit),
     getAgentEvents: (agentId, after = 0, limit = -1) => tail(events.filter(e => e.agentId === agentId && e.id > after), limit),
     searchEvents: f => {
@@ -307,12 +398,14 @@ function openJson(): IStore {
     pruneEvents: (before, keep) => {
       const n = events.length;
       events = events.filter(e => e.ts >= before || keep.includes(e.type));
-      if (events.length !== n) save();
+      if (events.length !== n) { writeEventLines(eventsPath, events); save(); }
       return n - events.length;
     },
     appendEvent: (e, agentId) => {
       const full: AgentEvent = { ...e, id: nextEventId++, ts: Date.now(), agentId };
       events.push(full);
+      // Append-only: one line, no rewrite of everything that came before.
+      try { appendFileSync(eventsPath, JSON.stringify(full) + '\n'); } catch { /* reported on the next write */ }
       save();
       return full;
     },
@@ -325,4 +418,19 @@ function openJson(): IStore {
   };
 }
 
-export const store: IStore = withHistory((process.env.AGENTIX_STORE !== 'json' && openSqlite()) || openJson(), AGENTIX_HOME);
+export type StoreKind = 'auto' | 'sqlite' | 'json';
+
+/**
+ * Open a store in `home`. 'auto' uses SQLite when Node has node:sqlite and the JSON files
+ * otherwise. The factory exists so a test can open a second, independent store (the contract
+ * test runs the same checks against both implementations).
+ */
+export function createStore(home: string, kind: StoreKind = 'auto', opts: { history?: boolean } = {}): IStore {
+  mkdirSync(home, { recursive: true });
+  const base = kind === 'json' ? openJson(home)
+    : kind === 'sqlite' ? (openSqlite(home) ?? openJson(home))
+      : (openSqlite(home) ?? openJson(home));
+  return opts.history === false ? base : withHistory(base, home);
+}
+
+export const store: IStore = createStore(AGENTIX_HOME, process.env.AGENTIX_STORE === 'json' ? 'json' : 'auto');

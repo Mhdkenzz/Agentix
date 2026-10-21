@@ -8,6 +8,28 @@ The server listens on 127.0.0.1 only and answers only requests for this machine:
 
 All routes are relative to `http://127.0.0.1:4317` (`AGENTIX_PORT` changes the port).
 
+## Authentication
+
+By default the API is open to this machine only (see above). Set `AGENTIX_TOKEN` to lock it: every
+`/api` request then needs that token, in the `x-agentix-token` header or as `?token=` in the query
+(a browser's `EventSource` cannot send headers, so the event stream takes the query form). Without it
+the server answers `401 { "error": "Token required" }`. The dashboard takes the token from the address
+bar once (`/?token=…`), keeps it in the browser and drops it from the URL; the CLI sends
+`AGENTIX_TOKEN` from the environment. The dashboard itself (the static files) stays reachable
+without a token.
+
+## Limits
+
+The server keeps itself from being taken over by a runaway agent:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENTIX_MAX_AGENTS` | 64 | agents in the office at once; `POST /api/agents` answers `429` above it |
+| `AGENTIX_MAX_CONCURRENT_TURNS` | 12 | turns running at the same time; a turn above it is refused with an `error` event |
+| `AGENTIX_TURN_TIMEOUT_MS` | 1800000 (30 min) | a turn that runs longer is stopped; the agent goes to `error` and its task to `blocked` |
+| `AGENTIX_SSE_MAX_REPLAY` | 2000 | how many events one stream replay may contain |
+| `AGENTIX_KILL_GRACE_MS` | 3000 | how long an interrupted CLI may take to exit before it is killed |
+
 ### GET `/api/adapters/:kind/models[?refresh=1]`
 
 The models a CLI can run with, for the model picker: `{ models: [{ id, label?, group?, description?, efforts?, defaultEffort? }], current?, error? }`.
@@ -94,6 +116,7 @@ it), used from the agent's next turn. A worker whose `cwd` is inside a git repos
 
 **Response:** `201` with the created agent. `400` for an unknown kind/role/avatar, `409` if a
 coordinator or CEO already exists (body has `data.existing`); send `"replace": true` to demote it to worker.
+`429` when the office is full (see Limits).
 
 ### PATCH `/api/agents/:id`
 
@@ -109,6 +132,7 @@ One agent. `404` if unknown.
 
 Stop and remove an agent. Its record and every event are kept: it gets `archivedAt`, leaves
 `GET /api/agents`, and stays in `GET /api/agents?archived=1`, `/api/events` and `/api/agents/:id/events`.
+The tasks it owned go back to the board as `todo` without an owner.
 
 ### POST `/api/agents/:id/session`
 
@@ -233,6 +257,12 @@ After a CEO request, Agentix waits for a coordinator reply, sends up to two non-
 and reports an issue after three unanswered requests. The timeout is 30 seconds by default and can be adjusted
 with `AGENTIX_CEO_REPLY_TIMEOUT_MS`. A coordinator response clears the watchdog.
 
+**What came of a command.** Every command the server runs for an agent is reported back to that agent:
+a `message` event with the result, and the next turn of that agent starts with a `[COMMAND RESULTS]`
+block listing what happened. A command that failed (an unknown agent, a task that is not the agent's,
+a misspelled verb) also gets an `error` event, and the agent gets a turn of its own to read it — at most
+three such turns in a row, so a command that keeps failing cannot loop.
+
 ### GET `/api/stream`
 
 **SSE** endpoint. Streams all events for all agents. Each message is
@@ -240,7 +270,8 @@ with `AGENTIX_CEO_REPLY_TIMEOUT_MS`. A coordinator response clears the watchdog.
 (or read the raw stream; `agentix watch` does).
 
 Replay before live events: from the `Last-Event-ID` header or `?after=N` if given (everything after
-it), otherwise the last `?tail=N` events (default 100).
+it), otherwise the last `?tail=N` events (default 100). A replay never contains more than
+`AGENTIX_SSE_MAX_REPLAY` events (2000 by default), so a client cannot pull the whole database in one go.
 
 ### GET `/api/agents/:id/stream`
 
@@ -269,6 +300,21 @@ it), otherwise the last `?tail=N` events (default 100).
 Besides the database (`$AGENTIX_HOME/agentix.db`), everything is appended to plain JSON Lines files that
 are never rewritten: `$AGENTIX_HOME/history/agents.jsonl` (one line each time an agent is created, changed,
 gets a session or is removed) and `$AGENTIX_HOME/history/<agentId>.jsonl` (every event of that agent).
+The lines are buffered and written in one go every few hundred milliseconds, so a busy agent does not
+slow the server down with one write per event.
+
+## Store
+
+The store is SQLite (`$AGENTIX_HOME/agentix.db`, `node:sqlite`) with a JSON fallback for Node versions
+without it (`AGENTIX_STORE=json` forces it). Both behave the same — the same contract test runs
+against both. Event search uses an FTS5 index (trigram tokenizer), so a text search does not scan the
+whole table; an SQLite build without FTS5 falls back to `LIKE`.
+
+## Leftover processes
+
+Every agent CLI the server starts is remembered in `$AGENTIX_HOME/runs/`. When the server starts, the
+CLIs a previous server left behind (a crash, a closed laptop) are stopped, so they cannot keep burning
+tokens with nobody watching. A pid is only killed when it still runs the binary Agentix started.
 
 ## Dashboard
 

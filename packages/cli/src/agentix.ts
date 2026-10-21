@@ -6,6 +6,8 @@ import { resolve } from 'node:path';
 
 const PORT = Number(process.env.AGENTIX_PORT) || 4317;
 const SERVER_URL = process.env.AGENTIX_URL || `http://127.0.0.1:${PORT}`;
+/** The API token, when the server runs with AGENTIX_TOKEN. */
+const TOKEN = process.env.AGENTIX_TOKEN || '';
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
@@ -26,7 +28,7 @@ async function api(path: string, method = 'GET', body?: unknown): Promise<any> {
   try {
     res = await fetch(`${SERVER_URL}${path}`, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(TOKEN ? { 'x-agentix-token': TOKEN } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -44,7 +46,7 @@ interface SSEMessage { id?: string; event: string; data: string }
 /** Read one SSE connection until it ends. Handles named events, ids and comments. */
 async function readSSE(url: string, lastId: string | undefined, onMessage: (m: SSEMessage) => void, signal?: AbortSignal): Promise<void> {
   const res = await fetch(url, {
-    headers: { Accept: 'text/event-stream', ...(lastId ? { 'Last-Event-ID': lastId } : {}) },
+    headers: { Accept: 'text/event-stream', ...(lastId ? { 'Last-Event-ID': lastId } : {}), ...(TOKEN ? { 'x-agentix-token': TOKEN } : {}) },
     signal,
   });
   if (!res.ok || !res.body) throw new CliError(`stream failed: ${res.status}`);
@@ -123,6 +125,10 @@ async function cmdServer() {
   const { server, sessionManager, port } = await startServer(PORT);
   console.log(`${GREEN}✓${RESET} Agentix server running on \x1b[36mhttp://127.0.0.1:${port}${RESET}`);
   console.log(`${DIM}  Store: ${store.getStoreType()}  |  Press Ctrl+C to stop${RESET}\n`);
+  if (TOKEN) {
+    // The dashboard needs the token too: this link hands it to the browser once.
+    console.log(`${DIM}  Token: open \x1b[36mhttp://127.0.0.1:${port}/?token=${TOKEN}\x1b[0m${RESET}\n`);
+  }
 
   let stopping = false;
   const stop = async () => {

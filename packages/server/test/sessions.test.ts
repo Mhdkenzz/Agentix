@@ -14,7 +14,7 @@ const outputs = (id: string) => sm.getAgentEvents(id).filter(e => e.type === 'ou
 test('every stored event is also published on the bus', async () => {
   const seen: AgentEvent[] = [];
   const off = bus.subscribe(e => seen.push(e));
-  const a = sm.createAgent('mock', { prompt: 'hello' });
+  const a = await sm.createAgent('mock', { prompt: 'hello' });
   await idle(a.id);
   off();
   assert.deepEqual(seen.filter(e => e.agentId === a.id).map(e => e.id), sm.getAgentEvents(a.id).map(e => e.id));
@@ -22,7 +22,7 @@ test('every stored event is also published on the bus', async () => {
 });
 
 test('steer mid-turn replaces the turn: the old one never finishes', async () => {
-  const a = sm.createAgent('mock', { prompt: 'first' });
+  const a = await sm.createAgent('mock', { prompt: 'first' });
   await waitFor(() => sm.getAgent(a.id)!.status === 'working', 2000, 'working');
   await sm.steerAgent(a.id, 'second');
   await idle(a.id);
@@ -31,7 +31,7 @@ test('steer mid-turn replaces the turn: the old one never finishes', async () =>
 });
 
 test('two steers at once: only the last one runs to completion', async () => {
-  const a = sm.createAgent('mock', { prompt: 'first' });
+  const a = await sm.createAgent('mock', { prompt: 'first' });
   await waitFor(() => sm.getAgent(a.id)!.status === 'working', 2000, 'working');
   await Promise.all([sm.steerAgent(a.id, 'second'), sm.steerAgent(a.id, 'third')]);
   await idle(a.id);
@@ -40,31 +40,32 @@ test('two steers at once: only the last one runs to completion', async () => {
 });
 
 test('three agents run at once without interfering', async () => {
-  const as = ['x', 'y', 'z'].map(p => sm.createAgent('mock', { prompt: p }));
+  const as = await Promise.all(['x', 'y', 'z'].map(p => sm.createAgent('mock', { prompt: p })));
   await Promise.all(as.map(a => idle(a.id)));
   assert.deepEqual(as.map(a => outputs(a.id)), [['Done: x'], ['Done: y'], ['Done: z']]);
 });
 
-test('avatar: random by default, explicit 0-9 honoured, others rejected', () => {
-  assert.equal(sm.createAgent('mock', { avatarId: 7 }).avatarId, 7);
-  const ids = new Set(Array.from({ length: 30 }, () => sm.createAgent('mock', {}).avatarId));
+test('avatar: random by default, explicit 0-9 honoured, others rejected', async () => {
+  assert.equal((await sm.createAgent('mock', { avatarId: 7 })).avatarId, 7);
+  const ids = new Set<number>();
+  for (let i = 0; i < 30; i++) ids.add((await sm.createAgent('mock', {})).avatarId);
   assert.ok(ids.size > 1, 'random avatars should vary');
-  assert.throws(() => sm.createAgent('mock', { avatarId: 12 }), HttpError);
-  assert.throws(() => sm.createAgent('nope', {}), /Unknown agent kind/);
+  await assert.rejects(sm.createAgent('mock', { avatarId: 12 }), HttpError);
+  await assert.rejects(sm.createAgent('nope', {}), /Unknown agent kind/);
 });
 
-test('only one coordinator: 409 unless replace, which demotes the old one', () => {
-  const c1 = sm.createAgent('mock', { role: 'coordinator', name: 'Boss' });
-  assert.throws(() => sm.createAgent('mock', { role: 'coordinator' }), (e: any) => e.status === 409);
-  const c2 = sm.createAgent('mock', { role: 'coordinator', replace: true });
+test('only one coordinator: 409 unless replace, which demotes the old one', async () => {
+  const c1 = await sm.createAgent('mock', { role: 'coordinator', name: 'Boss' });
+  await assert.rejects(sm.createAgent('mock', { role: 'coordinator' }), (e: any) => e.status === 409);
+  const c2 = await sm.createAgent('mock', { role: 'coordinator', replace: true });
   assert.equal(sm.getAgent(c1.id)!.role, 'worker');
   assert.equal(sm.getAgent(c2.id)!.role, 'coordinator');
   sm.updateAgent(c2.id, { role: 'worker' });
 });
 
 test('coordinator gets a batched [AGENTIX UPDATE] turn for steers and finished workers', async () => {
-  const coord = sm.createAgent('mock', { role: 'coordinator', name: 'Coord' });
-  const w = sm.createAgent('mock', { name: 'Worker1', prompt: 'build it' });
+  const coord = await sm.createAgent('mock', { role: 'coordinator', name: 'Coord' });
+  const w = await sm.createAgent('mock', { name: 'Worker1', prompt: 'build it' });
   await waitFor(() => sm.getAgent(w.id)!.status === 'working', 2000, 'worker working');
   await sm.steerAgent(w.id, 'use pnpm instead');
   await idle(w.id);
@@ -89,7 +90,7 @@ test('coordinator gets a batched [AGENTIX UPDATE] turn for steers and finished w
 });
 
 test('stop on an idle agent is a no-op; remove takes the agent out but keeps its record and history', async () => {
-  const a = sm.createAgent('mock', { prompt: 'p' });
+  const a = await sm.createAgent('mock', { prompt: 'p' });
   await idle(a.id);
   await sm.interruptAgent(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');

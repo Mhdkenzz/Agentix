@@ -24,7 +24,7 @@ test('detect() reports installed CLIs with their --version', async () => {
 });
 
 test('codex: streams output and tools, saves thread id, steer resumes it', async () => {
-  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'create hello.txt' });
+  const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'create hello.txt' });
   await settled(a.id);
 
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
@@ -44,7 +44,7 @@ test('codex: streams output and tools, saves thread id, steer resumes it', async
 });
 
 test('opencode: streams, saves sessionID, steer passes -s', async () => {
-  const a = sm.createAgent('opencode', { cwd: WORK, prompt: 'say ok' });
+  const a = await sm.createAgent('opencode', { cwd: WORK, prompt: 'say ok' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'ses_fake1');
   assert.deepEqual(texts(events(a.id, 'output')), ['ok']);
@@ -59,7 +59,7 @@ test('opencode: streams, saves sessionID, steer passes -s', async () => {
 });
 
 test('claude: streams, saves session_id, steer passes --resume', async () => {
-  const a = sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
+  const a = await sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'cl-fake-1');
   assert.deepEqual(texts(events(a.id, 'output')), ['All done']);
@@ -74,7 +74,7 @@ test('claude: streams, saves session_id, steer passes --resume', async () => {
 test('claude: not signed in gives one clear error, not the CLI reply and exit code', async () => {
   process.env.FAKE_CLAUDE_LOGGED_OUT = '1';
   try {
-    const a = sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
+    const a = await sm.createAgent('claude', { cwd: WORK, prompt: 'hi' });
     await settled(a.id);
     assert.equal(sm.getAgent(a.id)!.status, 'error');
     assert.deepEqual(events(a.id, 'output'), []);
@@ -87,7 +87,7 @@ test('claude: not signed in gives one clear error, not the CLI reply and exit co
 });
 
 test('pi: json events, session id, --session on steer, instructions as system prompt', async () => {
-  const a = sm.createAgent('pi', { cwd: WORK, prompt: 'say hi' });
+  const a = await sm.createAgent('pi', { cwd: WORK, prompt: 'say hi' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, '01a14434-77aa-7136-b481-570dba7b7def');
@@ -100,7 +100,7 @@ test('pi: json events, session id, --session on steer, instructions as system pr
   await settled(a.id);
   assert.deepEqual(fakeCalls('pi')[1], ['-p', '--mode', 'json', '--session', '01a14434-77aa-7136-b481-570dba7b7def', ' @file looks like an attachment']);
 
-  const c = sm.createAgent('pi', { cwd: WORK, role: 'coordinator', prompt: 'lead', replace: true });
+  const c = await sm.createAgent('pi', { cwd: WORK, role: 'coordinator', prompt: 'lead', replace: true });
   try {
     await settled(c.id);
     // (fakeCalls splits on newlines, which the instructions contain, so read the raw log)
@@ -114,7 +114,7 @@ test('pi: json events, session id, --session on steer, instructions as system pr
 test('pi: a failed model call (exit 0) ends the turn in error', async () => {
   process.env.FAKE_PI_ERROR = '1';
   try {
-    const a = sm.createAgent('pi', { cwd: WORK, prompt: 'x' });
+    const a = await sm.createAgent('pi', { cwd: WORK, prompt: 'x' });
     await settled(a.id);
     assert.equal(sm.getAgent(a.id)!.status, 'error');
     assert.match(texts(events(a.id, 'error')).join(), /bad token/);
@@ -122,7 +122,7 @@ test('pi: a failed model call (exit 0) ends the turn in error', async () => {
 });
 
 test('hermes: final answer as output, session id from stderr, --resume on steer', async () => {
-  const a = sm.createAgent('hermes', { cwd: WORK, prompt: '-starts with a dash' });
+  const a = await sm.createAgent('hermes', { cwd: WORK, prompt: '-starts with a dash' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, '20261016_101543_8b1686');
@@ -135,7 +135,7 @@ test('hermes: final answer as output, session id from stderr, --resume on steer'
 });
 
 test('gemini: stream-json deltas joined per message, tools, session id, usage, --resume on steer', async () => {
-  const a = sm.createAgent('gemini', { cwd: WORK, prompt: 'say hi' });
+  const a = await sm.createAgent('gemini', { cwd: WORK, prompt: 'say hi' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, '8f3b2c1e-5d4a-4f6b-9c7e-1a2b3c4d5e6f');
@@ -153,7 +153,7 @@ test('gemini: stream-json deltas joined per message, tools, session id, usage, -
 test('gemini: an error result fails the turn with its message, not the exit code', async () => {
   process.env.FAKE_GEMINI_ERROR = '1';
   try {
-    const a = sm.createAgent('gemini', { cwd: WORK, prompt: 'x' });
+    const a = await sm.createAgent('gemini', { cwd: WORK, prompt: 'x' });
     await settled(a.id);
     assert.equal(sm.getAgent(a.id)!.status, 'error');
     assert.deepEqual(texts(events(a.id, 'error')), ['Please set an Auth method in your settings.json']);
@@ -162,7 +162,7 @@ test('gemini: an error result fails the turn with its message, not the exit code
 });
 
 test('aider: plain-text reply as one output, edits and commits as tools, usage, history restored on steer', async () => {
-  const a = sm.createAgent('aider', { cwd: WORK, prompt: 'create hello.py' });
+  const a = await sm.createAgent('aider', { cwd: WORK, prompt: 'create hello.py' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, `aider:${WORK}`);
@@ -179,7 +179,7 @@ test('aider: plain-text reply as one output, edits and commits as tools, usage, 
 });
 
 test('goose: named session, plain-text reply, tool calls, --resume on steer', async () => {
-  const a = sm.createAgent('goose', { cwd: WORK, prompt: 'look around' });
+  const a = await sm.createAgent('goose', { cwd: WORK, prompt: 'look around' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   const name = sm.getAgent(a.id)!.nativeSessionId!;
@@ -201,7 +201,7 @@ test('goose: named session, plain-text reply, tool calls, --resume on steer', as
 });
 
 test('status goes thinking -> working -> idle with no duplicate status events', async () => {
-  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
+  const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
   await settled(a.id);
   const statuses = events(a.id, 'status').map(e => (e.data as any).status);
   assert.equal(statuses[0], 'thinking');
@@ -214,7 +214,7 @@ test('status goes thinking -> working -> idle with no duplicate status events', 
 test('a failing CLI ends in error status with its stderr', async () => {
   process.env.FAKE_FAIL = '1';
   try {
-    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
+    const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'x' });
     await settled(a.id);
     assert.equal(sm.getAgent(a.id)!.status, 'error');
     assert.match(texts(events(a.id, 'error')).join('\n'), /exited with 3: boom: model unavailable/);
@@ -231,7 +231,7 @@ test('interrupt kills a hanging CLI with SIGINT', async () => {
   process.env.FAKE_HANG = '1';
   try {
     const before = fakeCalls('codex').length;
-    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'hang' });
+    const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'hang' });
     await waitFor(() => fakeCalls('codex').length > before, 5000, 'codex to start');
     const t0 = Date.now();
     await sm.interruptAgent(a.id);
@@ -248,7 +248,7 @@ test('interrupt falls back to SIGTERM when SIGINT is ignored, and kills child pr
   process.env.FAKE_IGNORE_INT = '1';
   try {
     const before = fakeCalls('codex').length;
-    const a = sm.createAgent('codex', { cwd: WORK, prompt: 'stubborn' });
+    const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'stubborn' });
     await waitFor(() => fakeCalls('codex').length > before, 5000, 'codex to start');
     await new Promise(r => setTimeout(r, 100)); // let it reach `sleep`
     const { execFileSync } = await import('node:child_process');
@@ -266,7 +266,7 @@ test('interrupt falls back to SIGTERM when SIGINT is ignored, and kills child pr
 
 test('steering a busy CLI agent kills the old turn before resuming', async () => {
   process.env.FAKE_HANG = '1';
-  const a = sm.createAgent('codex', { cwd: WORK, prompt: 'long task' });
+  const a = await sm.createAgent('codex', { cwd: WORK, prompt: 'long task' });
   const before = fakeCalls('codex').length;
   await waitFor(() => sm.getAgent(a.id)!.nativeSessionId, 5000, 'session id');
   delete process.env.FAKE_HANG;

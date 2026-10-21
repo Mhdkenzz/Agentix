@@ -88,12 +88,14 @@ test('New agent: pick a model (and reasoning level) from the CLI\'s list, and ch
   await picker.getByLabel('Reasoning level').selectOption('high');
   await modal.getByRole('button', { name: 'Create agent' }).click();
 
+  // The panel opens only after the server answered the create, so the agent is in the store by now.
+  const panel = page.locator('.panel');
+  await expect(panel.locator('.model-tag')).toHaveText('gpt-6.1-sol:high');
+
   const orion = (await (await request.get('/api/agents')).json()).agents.find((a: any) => a.name === 'Orion');
   expect(orion.model).toBe('gpt-6.1-sol:high');
 
   // The panel shows the model; change it to another available model.
-  const panel = page.locator('.panel');
-  await expect(panel.locator('.model-tag')).toHaveText('gpt-6.1-sol:high');
   await panel.locator('.model-tag').click();
   const change = page.locator('.model-modal');
   await change.locator('select').first().selectOption('gpt-6-astra');

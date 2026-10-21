@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import type { AdapterContext } from './types.ts';
 import type { Usage } from '../../../shared/src/types.ts';
 import { cliPath } from '../settings.ts';
+import { registerRun, unregisterRun } from '../procs.ts';
 
 /** Grace period between SIGINT and SIGTERM when a turn is interrupted. */
 export const KILL_GRACE_MS = Number(process.env.AGENTIX_KILL_GRACE_MS) || 3000;
@@ -57,6 +58,8 @@ export function runCli(
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // own process group, so we can stop the CLI's children too
     });
+    // Remember the process, so a server that dies does not leave it running forever.
+    if (child.pid) registerRun(child.pid, cliPath(cmd), ctx.agent.id);
 
     // Signal the whole process group: the CLI may have exited already while a
     // child it started (holding our stdout pipe open) is still running.
@@ -89,6 +92,7 @@ export function runCli(
 
     child.on('error', err => {
       ctx.signal.removeEventListener('abort', onAbort);
+      if (child.pid) unregisterRun(child.pid);
       reject(err);
     });
     // If the CLI exits but leaves a background child holding stdout, don't wait forever.
@@ -99,6 +103,7 @@ export function runCli(
       closed = true;
       ctx.signal.removeEventListener('abort', onAbort);
       if (termTimer) clearTimeout(termTimer);
+      if (child.pid) unregisterRun(child.pid);
       if (ctx.signal.aborted || code === 0) return resolve();
       const tail = stderr.trim().split('\n').slice(-5).join('\n');
       reject(new Error(`${cmd} exited with ${code ?? sig}${tail ? `: ${tail}` : ''}`));

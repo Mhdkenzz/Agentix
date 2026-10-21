@@ -15,6 +15,8 @@ interface State {
   events: Record<string, AgentEvent[]>;
   lastEventId: number;
   connected: boolean;
+  /** the server wants an API token (AGENTIX_TOKEN) and we do not have it */
+  needsToken: boolean;
   selectedId?: string;
   arcs: Arc[];
   showNewAgent: boolean;
@@ -32,6 +34,7 @@ interface State {
   applyEvent(e: AgentEvent): void;
   setHistory(agentId: string, list: AgentEvent[]): void;
   setConnected(c: boolean): void;
+  setNeedsToken(v: boolean): void;
   select(id?: string): void;
   setShowNewAgent(v: boolean): void;
   pruneArcs(now: number): void;
@@ -43,6 +46,7 @@ export const useStore = create<State>((set, get) => ({
   events: {},
   lastEventId: 0,
   connected: false,
+  needsToken: false,
   arcs: [],
   showNewAgent: false,
   tasks: {},
@@ -124,6 +128,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setConnected(connected) { set({ connected }); },
+  setNeedsToken(needsToken) { set({ needsToken }); },
   select(selectedId) { set({ selectedId }); },
   setShowNewAgent(showNewAgent) { set({ showNewAgent }); },
   pruneArcs(now) {

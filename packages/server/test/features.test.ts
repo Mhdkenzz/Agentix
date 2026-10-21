@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { startServer } from '../src/index.ts';
 import { AGENTIX_HOME } from '../src/store.ts';
+import { flushHistory } from '../src/history.ts';
 import { updateSettings } from '../src/settings.ts';
 import { addNote, listNotes, searchContext, sharedContextBlock, chunk } from '../src/context.ts';
 import { parseCommands } from '../src/commands.ts';
@@ -67,6 +68,7 @@ test('removing an agent keeps it, its events and its history files', async () =>
   assert.equal((await json(`/api/agents/${id}/steer`, 'POST', { text: 'x' })).status, 404);
 
   // the plain files on disk
+  await flushHistory();   // the history files are written in batches
   const agentsLog = readFileSync(join(AGENTIX_HOME, 'history', 'agents.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   assert.deepEqual(agentsLog.filter(r => r.agent.id === id).map(r => r.op).filter(op => op !== 'session'), ['created', 'removed']);
   const ev = readFileSync(join(AGENTIX_HOME, 'history', `${id}.jsonl`), 'utf8').trim().split('\n').map(l => JSON.parse(l));

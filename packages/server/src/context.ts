@@ -7,7 +7,8 @@
 // notes, the output of every other agent and the text files in settings.contextPaths. The brief and the
 // best matches go in front of the prompt as a [SHARED CONTEXT] block, so agents build on each other's work.
 // With embeddings on (Settings: a local Ollama), the search also matches by meaning, not only by words.
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { readFile, stat, readdir } from 'node:fs/promises';
 import { join, extname, basename } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { Agent } from '../../shared/src/types.ts';
@@ -160,22 +161,70 @@ const TEXT_NAMES = new Set(['README', 'LICENSE', 'Makefile', 'Dockerfile', 'AGEN
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', 'target', '__pycache__', '.venv', 'venv',
   '.cache', 'coverage', '.idea', '.vscode', 'vendor', '.turbo']);
 
-const fileCache = new Map<string, { mtime: number; size: number; chunks: string[]; stats: Terms[] }>();
+/**
+ * A cache with a byte budget: the least recently used entries go first. The search caches the
+ * text it has read, so a big repository cannot make the server's memory grow without end.
+ */
+class Lru<V> {
+  private map = new Map<string, { value: V; bytes: number }>();
+  private bytes = 0;
+  private limit: number;
+  private sizeOf: (value: V) => number;
+
+  constructor(limit: number, sizeOf: (value: V) => number) {
+    this.limit = limit;
+    this.sizeOf = sizeOf;
+  }
+
+  get(key: string): V | undefined {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    this.map.delete(key);
+    this.map.set(key, hit);   // most recently used goes last
+    return hit.value;
+  }
+
+  set(key: string, value: V): void {
+    const old = this.map.get(key);
+    if (old) { this.bytes -= old.bytes; this.map.delete(key); }
+    this.map.set(key, { value, bytes: this.sizeOf(value) });
+    this.bytes += this.sizeOf(value);
+    while (this.bytes > this.limit && this.map.size > 1) {
+      const oldest = this.map.keys().next().value as string;
+      const entry = this.map.get(oldest);
+      if (!entry) break;
+      this.bytes -= entry.bytes;
+      this.map.delete(oldest);
+    }
+  }
+
+  clear(): void { this.map.clear(); this.bytes = 0; }
+  get size(): number { return this.map.size; }
+  get usedBytes(): number { return this.bytes; }
+}
+
+const FILE_CACHE_BYTES = 32 * 1024 * 1024;
+const OUTPUT_CACHE_BYTES = 16 * 1024 * 1024;
+const NOTE_CACHE_BYTES = 4 * 1024 * 1024;
+
+const fileCache = new Lru<{ mtime: number; size: number; chunks: string[]; stats: Terms[] }>(
+  FILE_CACHE_BYTES, v => v.chunks.reduce((s, c) => s + c.length, 0));
 /** Agent output never changes, so its words are counted once and kept. */
-const outputCache = new Map<number, { chunks: string[]; stats: Terms[] }>();
+const outputCache = new Lru<{ chunks: string[]; stats: Terms[] }>(
+  OUTPUT_CACHE_BYTES, v => v.chunks.reduce((s, c) => s + c.length, 0));
 /** Notes never change either. */
-const noteCache = new Map<string, Terms>();
+const noteCache = new Lru<Terms>(NOTE_CACHE_BYTES, v => v.tf.size * 64);
 
 /** Text files under a folder, newest-first order not needed; capped by count, size and depth. */
-function walk(root: string, files: string[], depth = 0) {
+async function walk(root: string, files: string[], depth = 0): Promise<void> {
   if (files.length >= MAX_FILES || depth > MAX_DEPTH) return;
   let entries: import('node:fs').Dirent[];
-  try { entries = readdirSync(root, { withFileTypes: true }); } catch { return; }
+  try { entries = await readdir(root, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     if (files.length >= MAX_FILES) return;
     const p = join(root, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) walk(p, files, depth + 1);
+      if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) await walk(p, files, depth + 1);
     } else if (e.isFile() && (TEXT_EXT.has(extname(e.name).toLowerCase()) || TEXT_NAMES.has(basename(e.name, extname(e.name))))) {
       files.push(p);
     }
@@ -183,18 +232,22 @@ function walk(root: string, files: string[], depth = 0) {
 }
 
 /** A file's chunks and their word counts; read and counted again only when the file changed. */
-function fileChunks(path: string, budget: number): { chunks: string[]; stats: Terms[] } | undefined {
+async function fileChunks(path: string, budget: number): Promise<{ chunks: string[]; stats: Terms[] } | undefined> {
   let st;
-  try { st = statSync(path); } catch { return undefined; }
+  try { st = await stat(path); } catch { return undefined; }
   if (st.size > MAX_FILE_BYTES || st.size > budget) return undefined;
   const cached = fileCache.get(path);
   if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) return cached;
   let text = '';
-  try { text = readFileSync(path, 'utf8'); } catch { return undefined; }
+  try { text = await readFile(path, 'utf8'); } catch { return undefined; }
   if (text.includes('\u0000')) return undefined;   // binary
   const chunks = chunk(text);
   const name = basename(path);
-  const stats = chunks.map(c => countTerms(`${name} ${c}`));
+  const stats: Terms[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    stats.push(countTerms(`${name} ${chunks[i]}`));
+    if (i % 64 === 63) await yieldToLoop();   // counting a big file must not freeze the server
+  }
   fileCache.set(path, { mtime: st.mtimeMs, size: st.size, chunks, stats });
   return { chunks, stats };
 }
@@ -241,25 +294,29 @@ async function collectDocs(opts: SearchOptions): Promise<Doc[]> {
       if (!e.text || e.agentId === opts.excludeAgentId) continue;
       if (bytes > OUTPUT_BUDGET) break;
       bytes += e.text.length;
-      let cached = outputCache.get(e.id);
+      let cached = outputCache.get(String(e.id));
       if (!cached) {
         const chunks = chunk(e.text);
-        cached = { chunks, stats: chunks.map(countTerms) };
-        outputCache.set(e.id, cached);
+        const stats: Terms[] = [];
+        for (let i = 0; i < chunks.length; i++) {
+          stats.push(countTerms(chunks[i]));
+          if (i % 64 === 63) await yieldToLoop();
+        }
+        cached = { chunks, stats };
+        outputCache.set(String(e.id), cached);
       }
       for (let i = 0; i < cached.chunks.length; i++) {
         docs.push({ source: 'output', title: `${names.get(e.agentId) ?? e.agentId}'s output`, text: cached.chunks[i], ts: e.ts, agentId: e.agentId, eventId: e.id, terms: cached.stats[i] });
       }
       await tick();
     }
-    for (const id of outputCache.keys()) { if (outputCache.size <= OUTPUT_EVENTS * 2) break; outputCache.delete(id); }
   }
   if (sources.has('file')) {
     const files: string[] = [];
-    for (const root of getSettings().contextPaths) walk(root, files);
+    for (const root of getSettings().contextPaths) await walk(root, files);
     let bytes = 0;
     for (const f of files) {
-      const got = fileChunks(f, FILE_BUDGET - bytes);
+      const got = await fileChunks(f, FILE_BUDGET - bytes);
       if (got) {
         bytes += got.chunks.reduce((s, c) => s + c.length, 0);
         for (let i = 0; i < got.chunks.length; i++) {
@@ -273,7 +330,7 @@ async function collectDocs(opts: SearchOptions): Promise<Doc[]> {
 }
 
 /** BM25 (k1 = 1.2, b = 0.75) scores, one per doc; 0 where no query term occurs. */
-function bm25(docs: Doc[], query: string): number[] {
+async function bm25(docs: Doc[], query: string): Promise<number[]> {
   const wanted = [...new Set(tokenize(query))];
   if (!wanted.length || !docs.length) return docs.map(() => 0);
   // Only the query's words are counted, so the work is proportional to the query, not the corpus.
@@ -285,7 +342,9 @@ function bm25(docs: Doc[], query: string): number[] {
   }
   const avg = total / docs.length || 1;
   const N = docs.length;
-  return docs.map(d => {
+  const scores: number[] = [];
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
     let score = 0;
     for (const t of wanted) {
       const f = d.terms.tf.get(t);
@@ -294,8 +353,10 @@ function bm25(docs: Doc[], query: string): number[] {
       score += Math.log(1 + (N - n + 0.5) / (n + 0.5)) * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * d.terms.len / avg));
     }
     // notes are facts agents chose to share: rank them a little higher
-    return d.source === 'note' ? score * 1.3 : score;
-  });
+    scores.push(d.source === 'note' ? score * 1.3 : score);
+    if (i % 512 === 511) await yieldToLoop();   // scoring many documents must not freeze the server
+  }
+  return scores;
 }
 
 /** Best first, one hit per output event or file chunk, scores rounded. */
@@ -318,7 +379,7 @@ function pick(docs: Doc[], scores: number[], limit: number): Hit[] {
 /** Keyword (BM25) search over notes, agent outputs and indexed files. */
 export async function searchContext(query: string, opts: SearchOptions = {}): Promise<Hit[]> {
   const docs = await collectDocs(opts);
-  return pick(docs, bm25(docs, query), opts.limit ?? 10);
+  return pick(docs, await bm25(docs, query), opts.limit ?? 10);
 }
 
 // ---------- optional semantic search (embeddings from a local Ollama) ----------
@@ -374,7 +435,7 @@ export async function searchContextSmart(query: string, opts: SearchOptions = {}
   const settings = getSettings().embeddings;
   if (settings.provider !== 'ollama' || !tokenize(query).length) return searchContext(query, opts);
   const docs = await collectDocs(opts);
-  const keyword = bm25(docs, query);
+  const keyword = await bm25(docs, query);
   try {
     const cache = loadEmbeddings(settings.model);
     const keys = docs.map(d => hashText(settings.model, d.text));

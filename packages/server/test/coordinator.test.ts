@@ -34,7 +34,7 @@ test('parseCommands: spawn/steer/stop/tell, bullets and errors', () => {
 });
 
 test('coordinator @@spawn creates a worker at work, @@steer and @@stop reach it', async () => {
-  const coord = sm.createAgent('mock', { role: 'coordinator', name: 'Boss' });
+  const coord = await sm.createAgent('mock', { role: 'coordinator', name: 'Boss' });
   await sm.steerAgent(coord.id, 'say: @@spawn kind=mock name=Rook avatar=4 :: build the thing');
   await waitFor(() => byName('Rook'), 3000, 'Rook spawned');
   const rook = byName('Rook')!;
@@ -63,7 +63,7 @@ test('coordinator @@spawn creates a worker at work, @@steer and @@stop reach it'
 
 test('coordinator task assignment starts an existing idle worker', async () => {
   const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
-  const worker = sm.createAgent('mock', { name: 'AssignedWorker' });
+  const worker = await sm.createAgent('mock', { name: 'AssignedWorker' });
   const title = 'work an already-created assignment';
   await idle(coord.id).catch(() => {});
   await sm.steerAgent(coord.id, `say: @@task owner=${worker.name} :: ${title}`);
@@ -72,7 +72,7 @@ test('coordinator task assignment starts an existing idle worker', async () => {
 });
 
 test('a task kenz assigns on the board starts the idle worker, or queues behind its turn', async () => {
-  const worker = sm.createAgent('mock', { name: 'BoardWorker' });
+  const worker = await sm.createAgent('mock', { name: 'BoardWorker' });
   const first = sm.addTask({ title: 'board task one', owner: worker.name });
   await waitFor(() => sm.isRunning(worker.id), 2000, 'worker started');
   const second = sm.addTask({ title: 'board task two', owner: worker.id });
@@ -92,7 +92,7 @@ test('a task kenz assigns on the board starts the idle worker, or queues behind 
 test('CEO: sees the team digest, can only @@tell the coordinator', async () => {
   const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
   await idle(coord.id).catch(() => {});
-  const ceo = sm.createAgent('mock', { role: 'ceo', name: 'Chief' });
+  const ceo = await sm.createAgent('mock', { role: 'ceo', name: 'Chief' });
   await sm.steerAgent(ceo.id, 'say: @@tell coordinator :: start the tests');
   await waitFor(() => evs(coord.id, 'message').some(e => e.from === ceo.id && e.text === 'start the tests'), 3000, 'CEO -> coordinator');
   const out = evs(ceo.id, 'output')[0].text!;
@@ -149,7 +149,7 @@ test('human coordinator mode: no updates, coordinator commands not run', async (
     const coord = sm.getAgents().find(a => a.role === 'coordinator')!;
     await idle(coord.id).catch(() => {});
     const n = evs(coord.id, 'message').length;
-    const w = sm.createAgent('mock', { name: 'Solo', prompt: 'p' });
+    const w = await sm.createAgent('mock', { name: 'Solo', prompt: 'p' });
     await idle(w.id);
     await sm.steerAgent(coord.id, 'say: @@spawn kind=mock name=Ghost :: boo');
     await waitFor(() => evs(coord.id, 'error').some(e => /mode is "human"/.test(e.text!)), 3000, 'ignored');
@@ -170,7 +170,7 @@ test('askCoordinator queues kenz\'s note as an update', async () => {
 });
 
 test('role instructions go to a CLI coordinator once per session', async () => {
-  const c = sm.createAgent('codex', { role: 'coordinator', name: 'CodexBoss', replace: true, prompt: 'hello team' });
+  const c = await sm.createAgent('codex', { role: 'coordinator', name: 'CodexBoss', replace: true, prompt: 'hello team' });
   await idle(c.id);
   await sm.steerAgent(c.id, 'second turn');
   await idle(c.id);

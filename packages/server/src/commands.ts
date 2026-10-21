@@ -19,7 +19,36 @@ export type Command =
   | { op: 'remember'; text: string; line: string }
   | { op: 'task'; id?: string; opts: Record<string, string>; text: string; line: string };
 
-const LINE = /^\s*(?:[-*>]\s*)?`?@@(spawn|steer|stop|tell|remember|task)\b(.*?)`?\s*$/i;
+const OPS = ['spawn', 'steer', 'stop', 'tell', 'remember', 'task'];
+
+/** Any line that looks like a command: "@@word ...". The verb may be unknown (a typo). */
+const LINE = /^\s*(?:[-*>]\s*)?`?@@(\w+)\b(.*?)`?\s*$/i;
+
+/** Edit distance, small strings only. */
+function distance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let last = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (a[i - 1] === b[j - 1] ? 0 : 1));
+      last = tmp;
+    }
+  }
+  return prev[b.length];
+}
+
+/** The closest known verb, when the typo is close enough to guess. */
+function didYouMean(verb: string): string | undefined {
+  let best: string | undefined;
+  let bestD = Infinity;
+  for (const op of OPS) {
+    const d = distance(verb, op);
+    if (d < bestD) { bestD = d; best = op; }
+  }
+  return bestD <= Math.max(1, Math.floor(verb.length / 3)) ? best : undefined;
+}
 
 export function parseCommands(text: string): { commands: Command[]; errors: string[] } {
   const commands: Command[] = [];
@@ -28,6 +57,14 @@ export function parseCommands(text: string): { commands: Command[]; errors: stri
     const m = LINE.exec(raw);
     if (!m) continue;
     const op = m[1].toLowerCase();
+    if (!OPS.includes(op)) {
+      // A misspelled verb used to be silently ignored, so the agent never learned its command did nothing.
+      // Only guessable words count: "@@2024" in a sentence is not a broken command.
+      if (!/^[a-z][a-z0-9_-]{1,20}$/i.test(op)) continue;
+      const guess = didYouMean(op);
+      errors.push(`${raw.trim()}: unknown command "@@${op}"${guess ? ` (did you mean "@@${guess}"?)` : ''}`);
+      continue;
+    }
     const rest = m[2];
     const sep = rest.indexOf('::');
     const head = (sep >= 0 ? rest.slice(0, sep) : rest).trim();

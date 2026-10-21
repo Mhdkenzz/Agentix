@@ -32,7 +32,7 @@ export function App() {
   }, [server, connected, agentCount, pathname, navigate]);
 
   useEffect(() => {
-    const { setAgents, applyEvent, setConnected } = useStore.getState();
+    const { setAgents, applyEvent, setConnected, setNeedsToken } = useStore.getState();
     let stop = () => {};
     // Snapshot first, then only the events after it. The panel loads an agent's history on demand.
     let cancelled = false;
@@ -44,7 +44,12 @@ export function App() {
         setConnected(c);
         if (c) api.agents().then(setAgents).catch(() => {}); // resync after a reconnect
       });
-    }).catch(() => { setConnected(false); retry = setTimeout(start, 2000); });
+    }).catch((err: any) => {
+      setConnected(false);
+      // 401: the server wants a token. Say so instead of looking like a dead server.
+      if (err?.status === 401) setNeedsToken(true);
+      retry = setTimeout(start, 2000);
+    });
     start();
     api.settings().then(useStore.getState().setServerSettings).catch(() => {});
     api.tasks().then(useStore.getState().setTasks).catch(() => {});
