@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api.ts';
 import { useStore } from '../store.ts';
+import { AccessibleDialog } from './AccessibleDialog.tsx';
 
 export function NewSessionModal({ onClose }: { onClose(): void }) {
   const agentMap = useStore(s => s.agents);
@@ -33,9 +34,8 @@ export function NewSessionModal({ onClose }: { onClose(): void }) {
   const selected = agents.find(agent => agent.id === agentId);
 
   return (
-    <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal session-modal" onSubmit={e => { e.preventDefault(); submit(); }}>
-        <h2>New session</h2>
+    <AccessibleDialog title="New session" className="session-modal" onClose={onClose} closeDisabled={busy}>
+      <form onSubmit={e => { e.preventDefault(); submit(); }}>
         <p className="muted session-modal-copy">Start a fresh native conversation for an existing agent.</p>
         <label>Agent
           <select value={agentId} onChange={e => setAgentId(e.target.value)} disabled={busy || !agents.length}>
@@ -51,13 +51,13 @@ export function NewSessionModal({ onClose }: { onClose(): void }) {
           <input type="checkbox" checked={clear} onChange={e => setClear(e.target.checked)} disabled={busy} />
           Clear this agent’s visible conversation too
         </label>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
         {!agents.length && <div className="warn">Create an agent before starting a session.</div>}
         <div className="row end">
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || !agentId}>{busy ? 'Starting…' : 'Start session'}</button>
         </div>
       </form>
-    </div>
+    </AccessibleDialog>
   );
 }

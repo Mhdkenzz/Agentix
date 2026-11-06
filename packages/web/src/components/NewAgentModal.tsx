@@ -5,6 +5,7 @@ import { AVATARS } from '../avatars/index.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { useStore } from '../store.ts';
 import { ModelPicker } from './ModelPicker.tsx';
+import { AccessibleDialog } from './AccessibleDialog.tsx';
 import type { Role } from '../../../shared/src/types.ts';
 
 export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): void; initialRole?: Role }) {
@@ -43,9 +44,8 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal" onSubmit={e => { e.preventDefault(); submit(); }}>
-        <h2>New agent</h2>
+    <AccessibleDialog title="New agent" onClose={onClose} closeDisabled={busy}>
+      <form onSubmit={e => { e.preventDefault(); submit(); }}>
         <div className="grid2">
           <label>Agent
             <select value={kind} onChange={e => { setKind(e.target.value); setModel(''); }}>
@@ -81,7 +81,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
             </button>
           ))}
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
         {conflict && (
           <div className="warn">
             {conflict}
@@ -89,10 +89,10 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
           </div>
         )}
         <div className="row end">
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy}>{busy ? 'Creating…' : 'Create agent'}</button>
         </div>
       </form>
-    </div>
+    </AccessibleDialog>
   );
 }

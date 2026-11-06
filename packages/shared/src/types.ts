@@ -64,6 +64,8 @@ export interface Task {
   id: string;
   title: string;
   status: TaskStatus;
+  /** Number of times a worker has actually started this task. */
+  attempts: number;
   /** agent id of the owner */
   owner?: string;
   /** who created it: 'user' or an agent id */

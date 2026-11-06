@@ -180,7 +180,7 @@ add a note. Any agent can save a note with a line `@@remember :: <fact>`.
 
 ### Tasks
 
-The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title, status, owner?, by, note?, createdAt, updatedAt }`,
+The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title, status, attempts, owner?, by, note?, createdAt, updatedAt }`,
 `status` one of `todo`, `doing`, `review`, `done`, `blocked`.
 
 - `GET /api/tasks`: `{ tasks }`
@@ -189,7 +189,9 @@ The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title
 - `DELETE /api/tasks/:id`
 
 Only the task assigned to a turn moves: `todo` or `review` to `doing`, then to `review` when it ends
-(`blocked` if it failed). A blocked task must be explicitly reopened to `todo`. `@@spawn ... :: <task>`
+(`blocked` if it failed). `attempts` counts worker starts and is informational; older task records default
+to zero. One recognizable temporary network/service failure gets one automatic retry, persisted with its
+reason in `note`; timeouts and other failures stay blocked for explicit review. `@@spawn ... :: <task>`
 adds the task for the new worker. The coordinator's `[TEAM STATUS]`/updates list open tasks.
 
 ### Permission approvals

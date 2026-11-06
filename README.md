@@ -54,7 +54,8 @@ optional local embeddings via Ollama) search over notes, past agent output and t
 Agents get the best matches in front of every task.
 
 **A task board** that moves on its own: `todo → doing → review` as agents work, `blocked` when a turn
-fails.
+fails. A recognizable temporary network or service failure gets one automatic retry; hard failures
+and timed-out turns stay blocked for review. Retry counts and the last transient error stay on the task.
 
 **Saved permission approvals.** Workers can ask the coordinator for approval. Agentix saves each request,
 pauses its active task, and records an explicit decision. Pending requests remain available on the Tasks

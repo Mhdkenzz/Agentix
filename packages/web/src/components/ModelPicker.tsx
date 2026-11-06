@@ -3,6 +3,7 @@
 // provider filter and a search box. Codex models also take a reasoning level, sent as "<model>:<level>".
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type ModelList } from '../api.ts';
+import { AccessibleDialog } from './AccessibleDialog.tsx';
 
 const cache = new Map<string, Promise<ModelList>>();
 function load(kind: string, refresh = false): Promise<ModelList> {
@@ -117,17 +118,16 @@ export function ChangeModelModal({ agentId, kind, name, current, onClose }: { ag
     try { await api.update(agentId, { model: model || null }); onClose(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   }
   return (
-    <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal model-modal" onSubmit={e => { e.preventDefault(); save(); }}>
-        <h2>{name}'s model</h2>
+    <AccessibleDialog title={`${name}'s model`} className="model-modal" onClose={onClose} closeDisabled={busy}>
+      <form onSubmit={e => { e.preventDefault(); save(); }}>
         <p className="muted small">Used from {name}'s next turn. The conversation continues.</p>
         <ModelPicker kind={kind} value={model} onChange={setModel} />
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
         <div className="row end">
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || model === (current ?? '')}>Save</button>
         </div>
       </form>
-    </div>
+    </AccessibleDialog>
   );
 }

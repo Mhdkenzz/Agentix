@@ -25,8 +25,15 @@ export function AgentSeat({ agent, position, selected, deskColor }: { agent: Age
   const [hover, setHover] = useState(false);
   const select = useStore(s => s.select);
   // the task this agent is on, shown on its desk tag
-  const task = useStore(s => Object.values(s.tasks).find(t => t.owner === agent.id && t.status === 'doing')
-    ?? Object.values(s.tasks).find(t => t.owner === agent.id && (t.status === 'todo' || t.status === 'review' || t.status === 'blocked')));
+  const task = useStore(s => {
+    let fallback;
+    for (const candidate of Object.values(s.tasks)) {
+      if (candidate.owner !== agent.id) continue;
+      if (candidate.status === 'doing') return candidate;
+      if (!fallback && (candidate.status === 'todo' || candidate.status === 'review' || candidate.status === 'blocked')) fallback = candidate;
+    }
+    return fallback;
+  });
   const status = agent.status;
   const working = status === 'working' || status === 'starting';
   const phase = useRef(Math.random() * 10).current;

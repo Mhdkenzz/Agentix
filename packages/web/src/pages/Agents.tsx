@@ -23,15 +23,14 @@ export function Agents() {
   const [error, setError] = useState('');
   const [modelFor, setModelFor] = useState<Agent>();
 
-  const all = Object.values(agents);
-  const kinds = [...new Set(all.map(a => a.kind))].sort();
-  const statuses = [...new Set(all.map(a => a.status))].sort();
+  const all = useMemo(() => Object.values(agents), [agents]);
+  const kinds = useMemo(() => [...new Set(all.map(a => a.kind))].sort(), [all]);
+  const statuses = useMemo(() => [...new Set(all.map(a => a.status))].sort(), [all]);
   const rows = useMemo(() => all
     .filter(a => (!role || a.role === role) && (!kind || a.kind === kind) && (!status || a.status === status)
       && (!q || `${a.name} ${a.id} ${a.activity} ${a.cwd}`.toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => ({ ceo: 0, coordinator: 1, worker: 2 }[a.role] - { ceo: 0, coordinator: 1, worker: 2 }[b.role]) || a.createdAt - b.createdAt),
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  [agents, role, kind, status, q]);
+  [all, role, kind, status, q]);
   const chosen = rows.filter(a => picked.has(a.id));
 
   async function run(fn: () => Promise<unknown>) {
@@ -57,13 +56,13 @@ export function Agents() {
       <h1>Agents <span className="muted small">{rows.length} of {all.length}</span></h1>
       <div className="filters">
         <input placeholder="Search name, id, activity, folder…" value={q} onChange={e => setQ(e.target.value)} />
-        <select value={role} onChange={e => setRole(e.target.value)}>
+        <select aria-label="Filter by role" value={role} onChange={e => setRole(e.target.value)}>
           <option value="">All roles</option><option value="ceo">CEO</option><option value="coordinator">Coordinator</option><option value="worker">Worker</option>
         </select>
-        <select value={kind} onChange={e => setKind(e.target.value)}>
+        <select aria-label="Filter by agent type" value={kind} onChange={e => setKind(e.target.value)}>
           <option value="">All kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}
         </select>
-        <select value={status} onChange={e => setStatus(e.target.value)}>
+        <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}>
           <option value="">All statuses</option>{statuses.map(k => <option key={k}>{k}</option>)}
         </select>
         <div className="grow" />

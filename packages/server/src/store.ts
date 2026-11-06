@@ -43,6 +43,8 @@ export interface IStore {
   /** all events after `after`; with `limit`, only the latest `limit` of those */
   getEvents(after?: number, limit?: number): AgentEvent[];
   getAgentEvents(agentId: string, after?: number, limit?: number): AgentEvent[];
+  /** Latest output for an agent, without loading unrelated status/tool events. */
+  getLatestAgentOutput(agentId: string): AgentEvent | undefined;
   appendEvent(event: NewEvent, agentId: string): AgentEvent;
   /** mark agents that were mid-turn when the server died; returns how many */
   resetBusyAgents(): number;
@@ -214,6 +216,7 @@ function openSqlite(home: string): IStore | null {
     deleteEvents: db.prepare('DELETE FROM events WHERE agentId = ?'),
     events: db.prepare('SELECT * FROM (SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC'),
     agentEvents: db.prepare('SELECT * FROM (SELECT * FROM events WHERE agentId = ? AND id > ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC'),
+    latestAgentOutput: db.prepare("SELECT * FROM events WHERE agentId = ? AND type = 'output' ORDER BY id DESC LIMIT 1"),
     insertEvent: db.prepare('INSERT INTO events (agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?)'),
     insertEventWithId: db.prepare('INSERT INTO events (id, agentId, type, ts, sender, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     resetBusy: db.prepare(`UPDATE agents SET status='idle', activity='idle (server restarted)' WHERE archivedAt IS NULL AND status IN (${BUSY.map(() => '?').join(',')})`),
@@ -250,6 +253,10 @@ function openSqlite(home: string): IStore | null {
     reset: () => { db.exec('DELETE FROM events; DELETE FROM agents;'); },
     getEvents: (after = 0, limit = -1) => q.events.all(after, limit).map(toEvent),
     getAgentEvents: (agentId, after = 0, limit = -1) => q.agentEvents.all(agentId, after, limit).map(toEvent),
+    getLatestAgentOutput: agentId => {
+      const event = q.latestAgentOutput.get(agentId);
+      return event ? toEvent(event) : undefined;
+    },
     appendEvent: (e, agentId) => {
       const ts = Date.now();
       const r = q.insertEvent.run(agentId, e.type, ts, e.from ?? null, e.text ?? null, e.data !== undefined ? JSON.stringify(e.data) : null);
@@ -417,6 +424,13 @@ function openJson(home: string): IStore {
     },
     getEvents: (after = 0, limit = -1) => tail(events.filter(e => e.id > after), limit),
     getAgentEvents: (agentId, after = 0, limit = -1) => tail(events.filter(e => e.agentId === agentId && e.id > after), limit),
+    getLatestAgentOutput: agentId => {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const event = events[i];
+        if (event.agentId === agentId && event.type === 'output') return { ...event };
+      }
+      return undefined;
+    },
     searchEvents: f => {
       const q = f.q?.toLowerCase();
       const out: AgentEvent[] = [];

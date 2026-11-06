@@ -7,7 +7,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 test.describe.configure({ mode: 'serial' });
 
 /** A top-bar page link; matched by its exact name so more pages can join the nav. */
-const nav = (page: Page, name: string) => page.locator('nav.topbar').getByRole('link', { name, exact: true });
+const nav = (page: Page, name: string) => page.locator('.topbar nav[aria-label="Main navigation"]').getByRole('link', { name, exact: true });
 
 interface ApiAgent { id: string; name: string; kind: string; role: string; status: string }
 async function agents(request: APIRequestContext): Promise<ApiAgent[]> {

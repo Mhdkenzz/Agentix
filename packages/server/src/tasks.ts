@@ -22,12 +22,15 @@ export function listTasks(): Task[] {
     const valid = data === undefined || (isJsonRecord(data) && Array.isArray(data.tasks) && data.tasks.every((t: any) =>
       t && typeof t.id === 'string' && /^t\d+$/.test(t.id) && typeof t.title === 'string'
       && TASK_STATUSES.includes(t.status) && typeof t.by === 'string'
+      && (t.attempts === undefined || (Number.isInteger(t.attempts) && t.attempts >= 0 && t.attempts <= 1_000_000))
       && Number.isFinite(t.createdAt) && Number.isFinite(t.updatedAt)));
     if (!valid) {
       quarantineJsonFile(file(), 'task board file has an invalid structure');
       cache = []; nextId = 1;
     } else {
       const tasks: Task[] = data?.tasks ?? [];
+      // Tasks saved before attempt tracking was added are still valid; start their counters at zero.
+      for (const task of tasks) task.attempts ??= 0;
       cache = tasks;
       nextId = Math.max(Number(data?.nextId) || 1, ...tasks.map(t => (Number(t.id.slice(1)) || 0) + 1));
     }
@@ -58,11 +61,23 @@ export function createTask(fields: { title: string; owner?: string; status?: Tas
   // short ids the coordinator can type: t1, t2, ... They never repeat, not even after a delete.
   const n = nextId++;
   const task: Task = {
-    id: `t${n}`, title, status, by: fields.by, createdAt: now, updatedAt: now,
+    id: `t${n}`, title, status, attempts: 0, by: fields.by, createdAt: now, updatedAt: now,
     ...(fields.owner ? { owner: fields.owner } : {}), ...(fields.note ? { note: fields.note } : {}),
   };
   save([...tasks, task]);
   return task;
+}
+
+/** Mark a task as actively being worked on and persist the attempt count before launching the CLI. */
+export function startTaskAttempt(id: string): Task {
+  const tasks = listTasks();
+  const task = tasks.find(item => item.id === id);
+  if (!task) throw new TaskError(`no task ${id}`);
+  task.attempts++;
+  task.status = 'doing';
+  task.updatedAt = Date.now();
+  save(tasks);
+  return { ...task };
 }
 
 export function updateTask(id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }): Task {

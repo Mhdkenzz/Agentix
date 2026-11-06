@@ -32,6 +32,9 @@ export function Ceo() {
   const [error, setError] = useState('');
   const [hire, setHire] = useState(false);
   const stopRef = useRef<(() => void) | undefined>(undefined);
+  const spaceHeld = useRef(false);
+  const micSpaceHeld = useRef(false);
+  const suppressMicClick = useRef(false);
   const spokenUpTo = useRef(lastEventId); // only read out replies that arrive after the page opened
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -95,12 +98,34 @@ export function Ceo() {
 
   // Hold Space to talk (unless typing in a field).
   useEffect(() => {
-    const typing = (e: KeyboardEvent) => e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
-    const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !e.repeat && !typing(e)) { e.preventDefault(); startTalking(); } };
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space' && !typing(e)) { e.preventDefault(); stopTalking(); } };
+    const interactive = (e: KeyboardEvent) => e.target instanceof HTMLElement && (
+      e.target.isContentEditable || Boolean(e.target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]'))
+    );
+    const down = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat && !interactive(e)) {
+        e.preventDefault();
+        spaceHeld.current = true;
+        startTalking();
+      }
+    };
+    const release = () => {
+      if (!spaceHeld.current && !micSpaceHeld.current) return;
+      spaceHeld.current = false;
+      micSpaceHeld.current = false;
+      stopTalking();
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && spaceHeld.current) { e.preventDefault(); release(); }
+    };
+    const blur = () => release();
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
+    };
   });
 
   function toggleVoice() {
@@ -147,6 +172,13 @@ export function Ceo() {
         <form className="talk" onSubmit={e => { e.preventDefault(); send(draft); }}>
           <button type="button" className={`mic ${listening ? 'on' : ''}`} disabled={!canListen}
             onPointerDown={startTalking} onPointerUp={stopTalking} onPointerLeave={() => listening && stopTalking()}
+            onKeyDown={e => { if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) { micSpaceHeld.current = true; startTalking(); } } }}
+            onKeyUp={e => { if (e.code === 'Space' && micSpaceHeld.current) { e.preventDefault(); micSpaceHeld.current = false; suppressMicClick.current = true; stopTalking(); setTimeout(() => { suppressMicClick.current = false; }, 0); } }}
+            onClick={e => {
+              if (e.detail !== 0 || suppressMicClick.current) return;
+              if (listening) stopTalking(); else startTalking();
+            }}
+            aria-label={listening ? 'Stop voice input and send' : 'Start voice input'}
             title={canListen ? 'Hold to talk' : 'Voice input needs Chrome or Edge'}>🎙</button>
           <input value={draft} onChange={e => setDraft(e.target.value)} placeholder={listening ? 'Listening…' : `Message ${ceo.name}…`} />
           <button className="btn primary" disabled={!draft.trim()}>Send</button>

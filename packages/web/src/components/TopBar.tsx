@@ -1,5 +1,5 @@
 // Page links, live counts by status, session switching, connection dot, "+ New agent".
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useStore, fmtTokens, fmtCost } from '../store.ts';
 import { api, type CoordinatorMode } from '../api.ts';
@@ -44,23 +44,28 @@ export function TopBar() {
   const setShowNewAgent = useStore(s => s.setShowNewAgent);
   const navigate = useNavigate();
   const [showNewSession, setShowNewSession] = useState(false);
-  const list = Object.values(agents);
-  const activeSessions = list
+  const list = useMemo(() => Object.values(agents), [agents]);
+  const activeSessions = useMemo(() => list
     .filter(agent => agent.nativeSessionId && agent.status !== 'stopped')
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const count = (pred: (s: string) => boolean) => list.filter(a => pred(a.status)).length;
-  const busy = count(s => s === 'thinking' || s === 'working' || s === 'starting');
-  const waiting = count(s => s === 'waiting_input');
-  const errors = count(s => s === 'error');
+    .sort((a, b) => a.name.localeCompare(b.name)), [list]);
+  const { busy, waiting, errors } = useMemo(() => list.reduce((counts, agent) => {
+    if (agent.status === 'thinking' || agent.status === 'working' || agent.status === 'starting') counts.busy++;
+    else if (agent.status === 'waiting_input') counts.waiting++;
+    else if (agent.status === 'error') counts.errors++;
+    return counts;
+  }, { busy: 0, waiting: 0, errors: 0 }), [list]);
   const usageToday = useStore(s => s.usageToday);
-  const tokensToday = Object.values(usageToday).reduce((n, u) => n + u.input + u.output, 0);
-  const costToday = Object.values(usageToday).reduce((n, u) => n + (u.cost ?? 0), 0);
+  const { tokensToday, costToday } = useMemo(() => Object.values(usageToday).reduce((totals, usage) => {
+    totals.tokensToday += usage.input + usage.output;
+    totals.costToday += usage.cost ?? 0;
+    return totals;
+  }, { tokensToday: 0, costToday: 0 }), [usageToday]);
   return (
-    <nav className="topbar">
+    <header className="topbar">
       <div className="brand">Agentix</div>
-      <div className="links" aria-label="Main navigation">
+      <nav className="links" aria-label="Main navigation">
         {PAGES.map(([to, label]) => <NavLink key={to} to={to} end={to === '/'}>{label}</NavLink>)}
-      </div>
+      </nav>
       <div className="grow" />
       <CoordinatorModeSelect />
       <div className="counts">
@@ -99,6 +104,6 @@ export function TopBar() {
         <button className="btn primary" onClick={() => setShowNewAgent(true)}>+ New agent</button>
       </div>
       {showNewSession && <NewSessionModal onClose={() => setShowNewSession(false)} />}
-    </nav>
+    </header>
   );
 }

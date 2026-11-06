@@ -15,7 +15,7 @@ import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command
 import { roleGuide } from './roles.ts';
 import { ApprovalError, createPermissionRequest, decidePermissionRequest, listPermissionRequests, markPermissionRequestApplied } from './approvals.ts';
 import { addNote, sharedContextBlock } from './context.ts';
-import { listTasks, createTask, updateTask, deleteTask, getTask, releaseInterruptedTasks, TaskError, TASK_STATUSES } from './tasks.ts';
+import { listTasks, createTask, updateTask, deleteTask, getTask, releaseInterruptedTasks, startTaskAttempt, TaskError, TASK_STATUSES } from './tasks.ts';
 import type { AgentChat, Task, TaskStatus } from '../../shared/src/types.ts';
 
 const ROLES: Role[] = ['ceo', 'coordinator', 'worker'];
@@ -32,9 +32,22 @@ const DEFAULT_TURN_TIMEOUT_MS = 30 * 60_000;
 const MAX_RESULT_TURNS = 3;
 /** A turn that is ready while the office is at its limit waits here instead of being dropped. */
 const MAX_QUEUED_TURNS = 100;
+/** Retry a task once when the CLI reports a recognizable transient service/network failure. */
+const MAX_AUTOMATIC_TASK_RETRIES = 1;
 /** How much of one event goes into the database and the event stream (a CLI can print a whole file). */
 const MAX_EVENT_TEXT = 100_000;
 const MAX_EVENT_DATA = 64_000;
+
+function isTransientTaskFailure(failure: string): boolean {
+  return /\b429\b|\b(?:502|503|504)\b|rate[\s_-]*limit|temporar(?:y|ily)|overloaded|service unavailable|network|fetch failed|socket hang up|connection (?:reset|closed|refused)|\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH)\b/i.test(failure);
+}
+
+function appendTaskNote(previous: string | undefined, latest: string): string {
+  const current = previous?.trim();
+  const recent = latest.slice(0, 600);
+  const earlier = current?.slice(0, 1_000 - recent.length - 2);
+  return earlier ? `${earlier}\n\n${recent}` : recent;
+}
 
 /** Read an environment number at every use, so tests can change it while the server runs. */
 function envMs(name: string, fallback: number): number {
@@ -606,16 +619,18 @@ export class SessionManager {
   }
 
   /** Start a newly assigned worker task, or queue it behind the worker's current turn. */
-  private startAssignedTask(task: Task, from: string): void {
-    if (task.status !== 'todo' || !task.owner) return;
+  private startAssignedTask(task: Task, from: string): boolean {
+    if (task.status !== 'todo' || !task.owner) return false;
     const worker = store.getAgent(task.owner);
-    if (!worker || worker.role !== 'worker') return;
-    const prompt = `[TASK ${task.id}] ${task.title}`;
+    if (!worker || worker.role !== 'worker') return false;
+    const feedback = task.note?.trim();
+    const prompt = `[TASK ${task.id}] ${task.title}${feedback ? `\n[Task feedback/context]\n${feedback.slice(0, 2_000)}` : ''}`;
     if (!this.queueTurn(worker.id, prompt, from, task.id)) {
       this.emit(worker.id, { type: 'error', from: 'system', text: `Could not queue task ${task.id}: the turn queue is full; the task remains on the board` });
-      return;
+      return false;
     }
     this.pump();
+    return true;
   }
 
   /** Bound saved messages per busy agent so a hung turn cannot grow memory or pending.json without limit. */
@@ -710,8 +725,15 @@ export class SessionManager {
       instructions = [commands, roleGuide(agent.role)].filter(Boolean).join('\n\n') || undefined;
     }
     this.briefed.set(agentId, agent.role);
-    // A blocked task stays blocked until a human or the coordinator explicitly reopens it.
-    if (agent.role === 'worker') this.advanceTask(taskId, agentId, ['todo', 'review'], 'doing');
+    // Persist the attempt before starting the worker so a restart does not reset the retry budget.
+    if (agent.role === 'worker' && taskId) {
+      const task = getTask(taskId);
+      // A queued task may be manually moved to "doing" before its worker gets a turn slot.
+      // Count it here too: attempts tracks actual worker starts, not board status transitions.
+      if (task?.owner === agentId && ['todo', 'doing', 'review'].includes(task.status)) {
+        this.emitTask(startTaskAttempt(taskId), 'system', 'Task');
+      }
+    }
 
     // The agent has to learn what came of the commands it wrote last time.
     const query = prompt;
@@ -813,7 +835,13 @@ export class SessionManager {
     // Keep the turn registered while the child process group exits. That keeps its workspace
     // reserved and prevents a replacement from writing beside a CLI that ignored the timeout.
     this.setStatus(agentId, 'working', 'stopping after timeout…');
-    this.advanceTask(turn.taskId, agentId, ['doing'], 'blocked');
+    const task = turn.taskId ? getTask(turn.taskId) : undefined;
+    if (task?.owner === agentId && task.status === 'doing') {
+      this.emitTask(updateTask(task.id, {
+        status: 'blocked',
+        note: appendTaskNote(task.note, `Task timed out on attempt ${task.attempts} after ${span}; reopen it to retry manually.`),
+      }), 'system', 'Task');
+    }
     this.queueUpdate(`${agent.name} (${agent.id}) timed out after ${span}`);
     // The instructions queued behind that turn will never run now: say so instead of keeping them
     // (or, worse, starting them straight after a timeout) and give the free slot to someone else.
@@ -1104,10 +1132,42 @@ export class SessionManager {
       }
       return; // steers/stops already produced their own update
     }
-    this.advanceTask(taskId, agentId, ['doing'], failure ? 'blocked' : 'review');
     if (failure) {
+      const task = taskId ? getTask(taskId) : undefined;
+      if (task?.owner === agentId && task.status === 'doing'
+        && task.attempts <= MAX_AUTOMATIC_TASK_RETRIES && isTransientTaskFailure(failure)) {
+        const retry = updateTask(task.id, {
+          status: 'todo',
+          note: appendTaskNote(task.note, `Transient failure on attempt ${task.attempts}; retrying automatically once: ${oneLine(failure, 180)}`),
+        });
+        this.emitTask(retry, 'system', 'Task');
+        if (this.startAssignedTask(retry, 'system')) {
+          this.queueUpdate(`${agent.name} (${agent.id}) hit a transient failure on ${task.id}; automatically retrying once.`);
+        } else {
+          const blocked = updateTask(task.id, {
+            status: 'blocked',
+            note: appendTaskNote(task.note, `Automatic retry could not be queued after a transient failure: ${oneLine(failure, 180)}. Reopen to retry manually.`),
+          });
+          this.emitTask(blocked, 'system', 'Task');
+          this.queueUpdate(`${agent.name} (${agent.id}) could not queue the automatic retry for ${task.id}; it is blocked for review.`);
+        }
+        return;
+      }
+      if (task?.owner === agentId && task.status === 'doing') {
+        this.emitTask(updateTask(task.id, {
+          status: 'blocked',
+          note: appendTaskNote(task.note, `Worker failed on attempt ${task.attempts}: ${oneLine(failure, 300)}`),
+        }), 'system', 'Task');
+      } else this.advanceTask(taskId, agentId, ['doing'], 'blocked');
       this.queueUpdate(`${agent.name} (${agent.id}) failed: ${oneLine(failure, 200)}`);
     } else {
+      const task = taskId ? getTask(taskId) : undefined;
+      if (task?.owner === agentId && task.status === 'doing') {
+        this.emitTask(updateTask(task.id, {
+          status: 'review',
+          ...(task.attempts > 1 ? { note: appendTaskNote(task.note, `Worker completed successfully on attempt ${task.attempts}; ready for review.`) } : {}),
+        }), 'system', 'Task');
+      } else this.advanceTask(taskId, agentId, ['doing'], 'review');
       this.queueUpdate(`${agent.name} (${agent.id}) finished its turn`);
     }
   }
@@ -1502,7 +1562,7 @@ export class SessionManager {
       : '';
     if (!agents.length) return `(no other agents)${tasks}`;
     return agents.map(a => {
-      const last = store.getAgentEvents(a.id, 0, 50).filter(e => e.type === 'output').pop();
+      const last = store.getLatestAgentOutput(a.id);
       const out = last?.text ? `\n    last output: ${oneLine(last.text, 200)}` : '';
       return `- ${a.name} (${a.id}, ${a.kind}, ${a.role}): ${a.status} — ${a.activity}${out}`;
     }).join('\n') + tasks;

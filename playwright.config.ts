@@ -47,6 +47,8 @@ export default defineConfig({
     stderr: 'pipe',
     env: {
       AGENTIX_HOME: HOME,
+      // Browser tests focus on product flows and origin checks; auth token behavior is covered by server tests.
+      AGENTIX_AUTH: 'off',
       AGENTIX_PORT: String(PORT),
       AGENTIX_UPDATE_DELAY_MS: '300',
       PATH: `${FAKEBIN}${delimiter}${process.env.PATH ?? ''}`,

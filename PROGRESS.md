@@ -376,3 +376,68 @@ being dropped, stranded or hidden.
 - Verification: 144 server tests pass; typecheck, lint, production build, `npm audit`, and
   `git diff --check` pass. The shell defaults to Node 18, below the declared Node 20.19+/22.12+
   minimum; verification used Node 22.23.4 from the local npm cache.
+
+## Frontend accessibility and responsive pass (2026-11-06)
+
+- New Agent, New Session and Change Model dialogs now expose dialog semantics, move focus inside,
+  trap Tab navigation, close on Escape or backdrop click, and restore focus when closed. Closing is
+  disabled during saves, and dialog errors are announced.
+- Keyboard users get a consistent focus ring, reduced-motion preferences are respected, and the CEO
+  voice button supports keyboard hold/toggle behavior without hijacking Space from other controls.
+- History gains an agent picker on narrow screens, labels for search/resume controls, and announced
+  selected states for event filters. Task controls have clearer names and instructions; the task form
+  stacks on small screens and the horizontal board shows a scroll cue.
+- Setup is centered on wide screens, and the top bar now uses a named navigation landmark.
+- Verification: typecheck, lint, production build and source `git diff --check` pass. The dialog's
+  accessible name, initial focus, Escape close and focus restoration were checked in a browser.
+
+## Visual polish pass (2026-11-06)
+
+- Replaced near-black surfaces and low-contrast gray copy with a layered blue-charcoal palette,
+  brighter secondary text, subtle violet lighting and clearer card/input borders.
+- Refined the top bar, selected navigation, buttons, cards, task columns and dialogs with consistent
+  radii, spacing, hover states and softer elevation. The setup flow now sits in a centered column on
+  wide displays.
+- Verification: typecheck, lint, production build and source `git diff --check` pass; the setup page
+  was reviewed in a 1280 px browser viewport.
+
+## Task review and rework loop (2026-11-06)
+
+- Review-column tasks now have explicit Approve and Request changes actions. Approval moves the task
+  to Done. Feedback is required before rework; submitting it saves the feedback as the task note,
+  returns the task to To do, and the existing scheduler sends it back to its assigned worker.
+- Submission errors keep the feedback in the form, and review actions prevent duplicate requests
+  while a save is in flight. Unassigned tasks retain the feedback without claiming a worker was
+  notified.
+- Verification: typecheck, lint, production build and `git diff --check` pass.
+
+## Bounded recovery for transient task failures (2026-11-06)
+
+- A worker task now retries once for recognized transient network/service failures such as 429/503,
+  connection resets and temporary unavailability. Timeouts, auth/configuration errors and other
+  failures still block the task for a human/coordinator decision; the retry cannot loop indefinitely.
+- Task attempt counts are saved before a worker starts, survive restarts, appear on task cards after
+  a retry and default to zero when loading older task files. The failure reason stays in the task note;
+  coordinators receive a retry update. If the retry cannot enter the queue, the task becomes blocked
+  with a clear explanation.
+- Verification: typecheck, lint, production build and source `git diff --check` pass.
+
+## Follow-up logic and harness audit (2026-11-06)
+
+- Queued task starts are counted even if the board was manually moved to Doing while waiting for a slot.
+- Review feedback now reaches the assigned worker. Task notes preserve earlier feedback and clarify the
+  latest retry, final failure, timeout or successful rework result.
+- CEO push-to-talk releases on keyup even after focus moves, and on window blur.
+- Browser test setup now disables auth only in its disposable test server, uses the current navigation
+  landmark and verifies agents work in their configured folder instead of expecting removed worktrees.
+- Verification: typecheck, lint, build, 144 server tests and 10 browser tests pass with Node 22.23.4;
+  `git diff --check` passes.
+
+## UI efficiency pass (2026-11-06)
+
+- Approval refreshes now pause in hidden tabs, resume immediately when visible, and never overlap.
+- The office chooses each agent's task in one scan instead of two; the top bar and Agents filters memoize
+  their derived collections and aggregate status/token totals with single passes.
+- Coordinator summaries query each agent's latest output directly instead of loading and filtering its
+  last 50 mixed events; the JSON fallback scans backward and stops at the match.
+- Verification: typecheck, lint, production build and `git diff --check` pass.

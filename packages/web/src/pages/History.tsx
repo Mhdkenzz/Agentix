@@ -136,16 +136,21 @@ export function History() {
       </aside>
       <section className="hist-main">
         <div className="filters">
+          <select className="hist-mobile-agent" aria-label="Choose agent history" value={agentId} onChange={e => pick(e.target.value)}>
+            <option value="">All agents</option>
+            {list.map(a => <option key={a.id} value={a.id}>{a.name}{a.archivedAt ? ' (removed)' : ''}</option>)}
+          </select>
           {agent && <select aria-label="Saved chats" value={chatId} onChange={e => pickChat(e.target.value)}>
             <option value="">All chats</option>
             {chats.map(chat => <option key={chat.id} value={chat.id}>
               {new Date(chat.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · {chat.title} · {chat.eventCount} events
             </option>)}
           </select>}
-          <input placeholder={`Search ${agent ? agent.name + "'s" : 'all'} history…`} value={q} onChange={e => updateFilters(e.target.value, types)} />
+          <input aria-label={`Search ${agent ? agent.name + "'s" : 'all'} history`} placeholder={`Search ${agent ? agent.name + "'s" : 'all'} history…`} value={q} onChange={e => updateFilters(e.target.value, types)} />
           <div className="chips">
             {TYPES.map(t => (
               <button key={t} className={`chip ${types.includes(t) ? 'on' : ''}`}
+                aria-pressed={types.includes(t)}
                 onClick={() => updateFilters(q, types.includes(t) ? types.filter(x => x !== t) : [...types, t])}>{t}</button>
             ))}
           </div>
@@ -163,7 +168,7 @@ export function History() {
             <div className="grow">
               <b>{agent.name}</b> <span className="muted small">{agent.kind} · {agent.status} · {agent.nativeSessionId ? `session ${agent.nativeSessionId}` : 'no saved session yet'}</span>
             </div>
-            <input value={resumeText} onChange={e => setResumeText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') resume(); }} />
+            <input aria-label="Instruction for the new turn" value={resumeText} onChange={e => setResumeText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') resume(); }} />
             <button className="btn primary small" onClick={resume}>Resume</button>
           </div>
         )}

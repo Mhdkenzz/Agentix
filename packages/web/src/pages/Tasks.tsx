@@ -24,15 +24,33 @@ export function Tasks() {
   const [who, setWho] = useState('');
   const [error, setError] = useState('');
   const [over, setOver] = useState<TaskStatus>();
+  const [reviewing, setReviewing] = useState<string>();
+  const [reviewFeedback, setReviewFeedback] = useState('');
+  const [reviewBusy, setReviewBusy] = useState<string>();
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let live = true;
-    const load = () => api.approvals().then(rows => { if (live) setApprovals(rows); }).catch(() => {});
+    let inFlight = false;
+    const load = async () => {
+      if (!live || document.visibilityState === 'hidden' || inFlight) return;
+      inFlight = true;
+      try {
+        const rows = await api.approvals();
+        if (live) setApprovals(rows);
+      } catch { /* keep the last successful snapshot until the next poll */ }
+      finally { inFlight = false; }
+    };
+    const onVisibility = () => { if (document.visibilityState === 'visible') void load(); };
     load();
     const timer = setInterval(load, 4000);
-    return () => { live = false; clearInterval(timer); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      live = false;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   const workers = Object.values(agents).filter(a => a.role === 'worker').sort((a, b) => a.createdAt - b.createdAt);
@@ -47,15 +65,29 @@ export function Tasks() {
   }, [tasks, who]);
   const name = (id?: string) => !id ? '' : id === 'user' ? 'you' : agents[id]?.name ?? archived[id]?.name ?? id;
 
-  async function act(fn: () => Promise<unknown>) {
+  async function act(fn: () => Promise<unknown>): Promise<boolean> {
     setError('');
-    try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    try { await fn(); return true; } catch (e) { setError(e instanceof Error ? e.message : String(e)); return false; }
   }
   const move = (id: string, status: TaskStatus) => tasks[id]?.status !== status && act(() => api.editTask(id, { status }));
   const decide = (request: PermissionRequest, decision: 'approved' | 'declined') => act(async () => {
     await api.decideApproval(request.id, decision, approvalNotes[request.id] ?? '');
     setApprovals(await api.approvals());
   });
+  async function submitReview(task: Task, decision: 'approve' | 'changes') {
+    if (reviewBusy) return;
+    setReviewBusy(task.id);
+    try {
+      const patch = decision === 'approve'
+        ? { status: 'done' as const }
+        : { status: 'todo' as const, note: reviewFeedback.trim() };
+      if (decision === 'changes' && !reviewFeedback.trim()) return;
+      if (await act(() => api.editTask(task.id, patch))) {
+        setReviewing(undefined);
+        setReviewFeedback('');
+      }
+    } finally { setReviewBusy(undefined); }
+  }
 
   return (
     <div className="page tasks">
@@ -99,7 +131,7 @@ export function Tasks() {
         const t = title.trim();
         if (t) act(() => api.addTask({ title: t, owner: owner || undefined }).then(() => setTitle('')));
       }}>
-        <input className="grow" value={title} onChange={e => setTitle(e.target.value)} placeholder="New task, e.g. “Add a login page with tests”" />
+        <input className="grow" aria-label="New task title" value={title} onChange={e => setTitle(e.target.value)} placeholder="New task, e.g. “Add a login page with tests”" />
         <select value={owner} onChange={e => setOwner(e.target.value)} aria-label="Owner">
           <option value="">no owner</option>
           {workers.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -107,6 +139,7 @@ export function Tasks() {
         <button className="btn primary" disabled={!title.trim()}>Add task</button>
       </form>
       {error && <div className="error">{error}</div>}
+      <p className="board-scroll-hint muted small">Scroll sideways to see all five columns. You can also change a task’s status from its menu.</p>
       <div className="board">
         {COLUMNS.map(c => (
           <section key={c.id} className={`col col-${c.id} ${over === c.id ? 'over' : ''}`} data-status={c.id}
@@ -123,17 +156,37 @@ export function Tasks() {
                     ? <button className="owner" onClick={() => { select(t.owner); navigate('/'); }} title={`Open ${name(t.owner)}`}><AvatarThumb id={agents[t.owner].avatarId} size={18} />{name(t.owner)}</button>
                     : <span className="muted">{t.owner ? name(t.owner) : 'no owner'}</span>}
                   <span className="muted mono">{t.id}</span>
+                  {t.attempts > 1 && <span className="task-retry-count" title={`Worker has started this task ${t.attempts} times`}>attempt {t.attempts}</span>}
                   <div className="grow" />
                   {t.status === 'blocked' && t.owner && agents[t.owner]?.role === 'worker' &&
                     <button className="btn small" title={`Reopen ${t.id} and send it back to ${agents[t.owner].name}`} onClick={() => act(() => api.editTask(t.id, { status: 'todo' }))}>Retry</button>}
                   <select className="inline" value={t.status} onChange={e => move(t.id, e.target.value as TaskStatus)} aria-label={`Status of ${t.title}`}>
                     {COLUMNS.map(s => <option key={s.id} value={s.id}>{s.title}</option>)}
                   </select>
-                  <button className="icon-btn" title="Delete task" onClick={() => {
+                  <button className="icon-btn" title="Delete task" aria-label={`Delete ${t.id}: ${t.title}`} onClick={() => {
                     if (window.confirm(`Delete ${t.id}: ${t.title}? This cannot be undone.`)) act(() => api.deleteTask(t.id));
                   }}>✕</button>
                 </div>
                 <div className="muted small">by {name(t.by)} · {new Date(t.updatedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</div>
+                {t.status === 'review' && <div className="task-review">
+                  {reviewing === t.id ? (
+                    <form className="task-review-form" onSubmit={e => { e.preventDefault(); submitReview(t, 'changes'); }}>
+                      <label>What should the worker change?
+                        <textarea rows={3} value={reviewFeedback} onChange={e => setReviewFeedback(e.target.value)} placeholder="Describe the remaining work or what needs fixing…" required />
+                      </label>
+                      <p className="muted small">{t.owner && agents[t.owner]?.role === 'worker'
+                        ? 'The task returns to To do and the assigned worker receives this feedback.'
+                        : 'The task returns to To do with this feedback saved as its note.'}</p>
+                      <div className="row end">
+                        <button type="button" className="btn small" disabled={reviewBusy === t.id} onClick={() => { setReviewing(undefined); setReviewFeedback(''); }}>Cancel</button>
+                        <button className="btn primary small" disabled={!reviewFeedback.trim() || !!reviewBusy}>{reviewBusy === t.id ? 'Sending…' : 'Send feedback'}</button>
+                      </div>
+                    </form>
+                  ) : <div className="task-review-actions">
+                    <button className="btn primary small" disabled={!!reviewBusy} onClick={() => submitReview(t, 'approve')}>Approve</button>
+                    <button className="btn small" disabled={!!reviewBusy} onClick={() => { setReviewing(t.id); setReviewFeedback(''); }}>Request changes</button>
+                  </div>}
+                </div>}
               </article>
             ))}
           </section>
