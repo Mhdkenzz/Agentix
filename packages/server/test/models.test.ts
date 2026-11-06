@@ -3,7 +3,7 @@ import { TMP, BIN, WORK, fakeCalls, waitFor } from './helpers.ts';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, chmodSync, mkdirSync } from 'node:fs';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -77,6 +77,7 @@ exit 0; fi
 echo '{"type":"thread.started","thread_id":"th-m"}'
 echo '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}'
 { printf '%s\\0' "$@"; printf '\\n'; } >> "${join(TMP, 'codex.args')}"
+node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\\n")' -- "$@" >> "${join(TMP, 'codex.calls')}"
 `);
   chmodSync(join(BIN, 'codex'), 0o755);
 
@@ -120,25 +121,16 @@ test('an agent created with a model runs with it; the model can be changed or cl
   assert.equal(cleared.body.agent.model, undefined, 'empty = back to the CLI default');
 });
 
-test('the CLI passes --model and --worktree/--no-worktree to the server', async () => {
+test('the CLI passes --model to the server and agents use the configured folder directly', async () => {
   const env = { ...process.env, AGENTIX_URL: base };
   const repo = join(TMP, 'cli-repo');
   mkdirSync(repo, { recursive: true });
-  execFileSync('git', ['-C', repo, 'init', '-q', '-b', 'main']);
-  writeFileSync(join(repo, 'README.md'), 'hi\n');
-  execFileSync('git', ['-C', repo, 'add', '-A']);
-  execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init']);
 
   const r = await run(process.execPath, [CLI, 'spawn', 'codex', '--name', 'CliSol', '--model', 'gpt-6-astra', '--cwd', repo, 'hi'], { env });
   assert.match(r.stdout, /Spawned CliSol/);
-  const withTree = (await json('/api/agents')).body.agents.find((a: any) => a.name === 'CliSol');
-  assert.equal(withTree.model, 'gpt-6-astra', 'the model reached the server');
-  assert.ok(withTree.worktree, 'a repo gets a worktree by default');
-
-  const plain = await run(process.execPath, [CLI, 'spawn', 'codex', '--name', 'CliPlain', '--no-worktree', '--cwd', repo, 'hi'], { env });
-  assert.match(plain.stdout, /Spawned CliPlain/);
-  const noTree = (await json('/api/agents')).body.agents.find((a: any) => a.name === 'CliPlain');
-  assert.equal(noTree.worktree, undefined, '--no-worktree means no worktree');
+  const agent = (await json('/api/agents')).body.agents.find((a: any) => a.name === 'CliSol');
+  assert.equal(agent.model, 'gpt-6-astra', 'the model reached the server');
+  assert.equal(agent.cwd, repo, 'the agent uses the requested folder');
 
   const bad = await run(process.execPath, [CLI, 'spawn', 'codex', '--name', 'CliBad', '--model', 'gpt-not-listed', 'hi'], { env }).catch(e => e);
   assert.equal(bad.code, 1);

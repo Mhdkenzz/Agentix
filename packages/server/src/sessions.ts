@@ -1,21 +1,22 @@
 // Agentix — session manager (spawn, steer, stop, restart) and coordinator updates
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { join, isAbsolute } from 'node:path';
-import type { Agent, AgentEvent, Role, Status } from '../../shared/src/types.ts';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { join, isAbsolute, relative, resolve, sep } from 'node:path';
+import type { Agent, AgentEvent, PermissionDecision, PermissionRequest, Role, Status } from '../../shared/src/types.ts';
 import { NAMES } from '../../shared/src/types.ts';
 import { getAdapter, mockEnabled } from './adapters/index.ts';
 import { unavailableModelError } from './adapters/models.ts';
 import { KILL_GRACE_MS, oneLine } from './adapters/proc.ts';
 import { store, AGENTIX_HOME } from './store.ts';
+import { readPendingWork, writePendingWork, clearPendingWork, MAX_INBOX_MESSAGES, MAX_INBOX_MESSAGE, type PendingTurn } from './pending.ts';
 import { EventBus } from './bus.ts';
 import { getSettings } from './settings.ts';
 import { parseCommands, COORDINATOR_INSTRUCTIONS, CEO_INSTRUCTIONS, type Command } from './commands.ts';
 import { roleGuide } from './roles.ts';
+import { ApprovalError, createPermissionRequest, decidePermissionRequest, listPermissionRequests, markPermissionRequestApplied } from './approvals.ts';
 import { addNote, sharedContextBlock } from './context.ts';
-import { createWorktree, worktreeStatus, mergeWorktree, discardWorktree, removeWorktree, GitError, type WorktreeStatus } from './worktree.ts';
-import { listTasks, createTask, updateTask, deleteTask, getTask, TaskError, TASK_STATUSES } from './tasks.ts';
-import type { Task, TaskStatus } from '../../shared/src/types.ts';
+import { listTasks, createTask, updateTask, deleteTask, getTask, releaseInterruptedTasks, TaskError, TASK_STATUSES } from './tasks.ts';
+import type { AgentChat, Task, TaskStatus } from '../../shared/src/types.ts';
 
 const ROLES: Role[] = ['ceo', 'coordinator', 'worker'];
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
@@ -29,6 +30,11 @@ const CEO_REPLY_ATTEMPTS = 3;
 const DEFAULT_TURN_TIMEOUT_MS = 30 * 60_000;
 /** How many turns in a row an agent may get just to hear that one of its commands failed. */
 const MAX_RESULT_TURNS = 3;
+/** A turn that is ready while the office is at its limit waits here instead of being dropped. */
+const MAX_QUEUED_TURNS = 100;
+/** How much of one event goes into the database and the event stream (a CLI can print a whole file). */
+const MAX_EVENT_TEXT = 100_000;
+const MAX_EVENT_DATA = 64_000;
 
 /** Read an environment number at every use, so tests can change it while the server runs. */
 function envMs(name: string, fallback: number): number {
@@ -60,7 +66,49 @@ type NewEvent = Omit<AgentEvent, 'id' | 'ts' | 'agentId'>;
 interface RunningTurn {
   controller: AbortController;
   done: Promise<void>;
+  /** the instruction as it was asked for, kept so a restart can offer the turn again */
+  prompt: string;
+  from: string;
+  startedAt: number;
+  taskId?: string;
+  timedOut?: boolean;
+  timeoutMessage?: string;
 }
+
+/** A turn waiting for a free slot at the office limit, in the order it was asked for. */
+interface QueuedTurn {
+  agentId: string;
+  prompt: string;
+  from: string;
+  taskId?: string;
+}
+
+/**
+ * Keep one event from filling the database: agent CLIs print whole files and command outputs,
+ * and every event is kept in SQLite, in the history file and in the client's stream.
+ */
+function capEvent(e: NewEvent): NewEvent {
+  let out = e;
+  if (typeof e.text === 'string' && e.text.length > MAX_EVENT_TEXT) {
+    const hidden = e.text.length - MAX_EVENT_TEXT;
+    out = { ...out, text: `${e.text.slice(0, MAX_EVENT_TEXT)}\n… (${hidden.toLocaleString('en-US')} more characters were not stored)` };
+  }
+  if (out.data !== undefined) {
+    let size = 0;
+    try { size = JSON.stringify(out.data)?.length ?? 0; } catch { size = 0; }
+    if (size > MAX_EVENT_DATA) out = { ...out, data: { truncated: true, bytes: size } };
+  }
+  return out;
+}
+
+/** What an agent sees when its turn is offered again after a restart: a resume, not a fresh duplicate. */
+const RESTART_NOTE = '[AGENTIX] The server restarted';
+const interruptedTurnPrompt = (prompt: string) =>
+  prompt.startsWith(RESTART_NOTE)
+    ? prompt // a second crash during the resume must not stack the note
+    : `${RESTART_NOTE} in the middle of your last turn. Check what you already did (the files, the tests, the task) before continuing, then finish it.\n\n${prompt}`;
+/** The instruction without the restart note, for log lines. */
+const withoutRestartNote = (prompt: string) => prompt.startsWith(RESTART_NOTE) ? prompt.slice(prompt.indexOf('\n\n') + 2) : prompt;
 
 interface PendingCeoRequest {
   ceoId: string;
@@ -80,8 +128,6 @@ export interface CreateOptions {
   replace?: boolean;
   /** who asked: 'user' or the id of the agent (coordinator) that spawned it */
   from?: string;
-  /** false: work directly in cwd even when it is a git repo (workers only; default from settings) */
-  worktree?: boolean;
   /** the model for the CLI's model flag; empty = the CLI's default */
   model?: string;
 }
@@ -110,6 +156,8 @@ function pickName(): string {
 export class SessionManager {
   private bus: EventBus;
   private running = new Map<string, RunningTurn>();
+  private removing = new Set<string>();
+  private steerSequence = new Map<string, number>();
   private pendingUpdates: string[] = [];
   private updateTimer: NodeJS.Timeout | undefined;
   /** One outstanding CEO request per CEO; follow-ups never interrupt a coordinator turn. */
@@ -118,6 +166,18 @@ export class SessionManager {
   private lastTurnEnd = new Map<string, number>();
   /** messages waiting for an agent to finish its current turn (CEO <- coordinator) */
   private inbox = new Map<string, string[]>();
+  /** turns ready to run but held back by AGENTIX_MAX_CONCURRENT_TURNS, oldest first */
+  private queued: QueuedTurn[] = [];
+  /** defer queued turns while session state is being reset */
+  private pumpPaused = 0;
+  /** true while shutting down: no queued or follow-up turn may start */
+  private stopping = false;
+  /** turns that were running at shutdown, offered again by the next server */
+  private stoppedTurns: PendingTurn[] = [];
+  /** the saved work is taken over once: a second call would re-offer this server's own turns */
+  private resumed = false;
+  /** the pending-work file could not be written: say so once, not on every turn */
+  private warnedPending = false;
   /** What happened to the @@ commands an agent wrote; delivered at the start of its next turn. */
   private commandResults = new Map<string, string[]>();
   /** How many turns in a row an agent got just to hear that one of its commands failed. */
@@ -135,7 +195,7 @@ export class SessionManager {
 
   /** Persist an event and fan it out to SSE subscribers. */
   emit(agentId: string, e: NewEvent): AgentEvent {
-    const full = store.appendEvent(e, agentId);
+    const full = store.appendEvent(capEvent(e), agentId);
     this.bus.publish(full);
     return full;
   }
@@ -155,6 +215,32 @@ export class SessionManager {
   getAgent(id: string, includeArchived = false): Agent | undefined { return store.getAgent(id, includeArchived); }
   getAgentEvents(id: string, after?: number, limit?: number): AgentEvent[] { return store.getAgentEvents(id, after, limit); }
   isRunning(id: string): boolean { return this.running.has(id); }
+
+  /** Saved conversation boundaries are derived from durable session markers in the event history. */
+  getChats(id: string): AgentChat[] {
+    if (!store.getAgent(id, true)) throw new HttpError(404, `Agent ${id} not found`);
+    const events = store.getAgentEvents(id);
+    if (!events.length) return [];
+    let starts = events.filter(e => e.type === 'agent.created' || e.type === 'session');
+    if (!starts.length || starts[0].id > events[0].id) starts = [events[0], ...starts];
+    const groups: AgentEvent[][] = starts.map(() => []);
+    let group = 0;
+    for (const event of events) {
+      while (group + 1 < starts.length && starts[group + 1].id <= event.id) group++;
+      groups[group].push(event);
+    }
+    return starts.map((start, i) => {
+      const beforeEventId = starts[i + 1]?.id;
+      const chatEvents = groups[i];
+      const firstPrompt = chatEvents.find(e => (e.type === 'message' || e.type === 'steer') && e.from !== 'system' && e.text?.trim());
+      const title = firstPrompt?.text?.trim() || (start.type === 'session' ? 'New session' : 'New chat');
+      return {
+        id: String(start.id), title: oneLine(title, 80), startedAt: start.ts,
+        eventCount: chatEvents.length, startEventId: start.id,
+        ...(beforeEventId === undefined ? {} : { beforeEventId }),
+      };
+    }).reverse();
+  }
 
   private requireAgent(id: string): Agent {
     const agent = store.getAgent(id);
@@ -176,6 +262,11 @@ export class SessionManager {
   }
 
   async createAgent(kind: string, opts: CreateOptions = {}): Promise<Agent> {
+    if (typeof kind !== 'string' || !kind.trim()) throw new HttpError(400, 'kind must be a non-empty string');
+    if (opts.name !== undefined && typeof opts.name !== 'string') throw new HttpError(400, 'name must be a string');
+    if (opts.cwd !== undefined && typeof opts.cwd !== 'string') throw new HttpError(400, 'cwd must be a string');
+    if (opts.prompt !== undefined && typeof opts.prompt !== 'string') throw new HttpError(400, 'prompt must be a string');
+    if (opts.replace !== undefined && typeof opts.replace !== 'boolean') throw new HttpError(400, 'replace must be a boolean');
     if (!getAdapter(kind)) throw new HttpError(400, `Unknown agent kind: ${kind}`);
     const role = opts.role ?? 'worker';
     if (!ROLES.includes(role)) throw new HttpError(400, `Unknown role: ${role}`);
@@ -191,7 +282,7 @@ export class SessionManager {
       if (!Number.isInteger(avatarId) || avatarId < 0 || avatarId > 9) throw new HttpError(400, 'avatarId must be 0-9 or "random"');
     }
 
-    let cwd = opts.cwd && opts.cwd !== '.' ? opts.cwd : join(AGENTIX_HOME, 'workspace');
+    const cwd = opts.cwd && opts.cwd !== '.' ? opts.cwd : join(AGENTIX_HOME, 'workspace');
     if (!isAbsolute(cwd)) throw new HttpError(400, 'cwd must be an absolute path');
     mkdirSync(cwd, { recursive: true });
 
@@ -199,17 +290,7 @@ export class SessionManager {
     while (store.getAgent(id, true)) id = 'a_' + randomUUID().slice(0, 6); // removed agents keep their ids
     const model = cleanModel(opts.model);
     this.claimRole(role, id, opts.replace);
-    const name = opts.name || pickName();
-
-    // Workers in a git repo get their own worktree and branch, so they never overwrite each other.
-    let worktree: Agent['worktree'];
-    let worktreeError: string | undefined;
-    if (role === 'worker' && getSettings().worktrees && opts.worktree !== false) {
-      try {
-        const wt = await createWorktree(cwd, id, name);
-        if (wt) { worktree = wt.worktree; cwd = wt.cwd; }
-      } catch (err: any) { worktreeError = err?.message ?? String(err); }
-    }
+    const name = opts.name?.trim() || pickName();
 
     const agent: Agent = {
       id,
@@ -221,13 +302,10 @@ export class SessionManager {
       status: 'idle',
       activity: 'idle',
       createdAt: Date.now(),
-      ...(worktree ? { worktree } : {}),
       ...(model ? { model } : {}),
     };
     store.createAgent(agent);
     this.emit(id, { type: 'agent.created', from: opts.from ?? 'user', text: `Agent ${agent.name} created (${kind}${model ? ` ${model}` : ''}, ${role})`, data: agent });
-    if (worktree) this.emit(id, { type: 'message', from: 'system', text: `Working on branch ${worktree.branch} in its own worktree (${worktree.path}), from ${worktree.repo}` });
-    if (worktreeError) this.emit(id, { type: 'error', from: 'system', text: `No worktree (${oneLine(worktreeError, 200)}); working directly in ${cwd}` });
 
     if (opts.prompt) {
       // Keep the first task in the history like any later instruction.
@@ -239,12 +317,17 @@ export class SessionManager {
 
   updateAgent(id: string, patch: { name?: string; avatarId?: number; role?: Role; cwd?: string; replace?: boolean; model?: string | null }): Agent {
     const agent = this.requireAgent(id);
-    if (patch.role && patch.role !== agent.role) {
+    if (patch.name !== undefined && typeof patch.name !== 'string') throw new HttpError(400, 'name must be a string');
+    if (patch.cwd !== undefined && typeof patch.cwd !== 'string') throw new HttpError(400, 'cwd must be a string');
+    if (patch.replace !== undefined && typeof patch.replace !== 'boolean') throw new HttpError(400, 'replace must be a boolean');
+    if (patch.role !== undefined) {
       if (!ROLES.includes(patch.role)) throw new HttpError(400, `Unknown role: ${patch.role}`);
-      this.claimRole(patch.role, id, patch.replace);
-      agent.role = patch.role;
+      if (patch.role !== agent.role) {
+        this.claimRole(patch.role, id, patch.replace);
+        agent.role = patch.role;
+      }
     }
-    if (patch.name) agent.name = patch.name;
+    if (patch.name?.trim()) agent.name = patch.name.trim();
     if (patch.avatarId !== undefined) {
       const n = Number(patch.avatarId);
       if (!Number.isInteger(n) || n < 0 || n > 9) throw new HttpError(400, 'avatarId must be 0-9');
@@ -252,6 +335,9 @@ export class SessionManager {
     }
     if (patch.cwd) {
       if (!isAbsolute(patch.cwd)) throw new HttpError(400, 'cwd must be an absolute path');
+      if (this.running.has(id) && this.canonicalCwd(patch.cwd) !== this.canonicalCwd(agent.cwd)) {
+        throw new HttpError(409, 'stop the agent before changing its working directory');
+      }
       agent.cwd = patch.cwd;
     }
     if (patch.model !== undefined) {
@@ -267,22 +353,48 @@ export class SessionManager {
   /** Take an agent out of the office. Its record and full history stay (in the database and history files). */
   async removeAgent(id: string): Promise<void> {
     const agent = this.requireAgent(id);
-    await this.interruptAgent(id);
-    if (agent.worktree) {
-      const kept = await removeWorktree(agent.worktree, agent.name);
-      this.emit(id, { type: 'message', from: 'system', text: kept
-        ? `Worktree removed; unmerged work kept on branch ${agent.worktree.branch} in ${agent.worktree.repo}`
-        : `Worktree removed (no unmerged work)` });
+    if (this.removing.has(id)) return;
+    this.removing.add(id);
+    const turn = this.running.get(id);
+    this.queued = this.queued.filter(q => q.agentId !== id);
+    this.inbox.delete(id);
+    this.savePending();
+    try {
+      await this.interruptAgent(id);
+      // The agent remains active, and its workspace reserved, until the adapter confirms exit.
+      if (turn) await turn.done;
+      // The tasks it owned go back on the board: nobody is working on them any more.
+      this.releaseTasks(id, agent.name);
+      store.archiveAgent(id);
+    } finally {
+      this.removing.delete(id);
     }
-    // The tasks it owned go back on the board: nobody is working on them any more.
-    this.releaseTasks(id, agent.name);
-    store.archiveAgent(id);
+    this.queued = this.queued.filter(q => q.agentId !== id);
     this.inbox.delete(id);
     this.briefed.delete(id);
     this.commandResults.delete(id);
     this.resultTurns.delete(id);
     this.clearCeoRequestsForAgent(id);
+    this.steerSequence.delete(id);
     this.emit(id, { type: 'agent.removed', text: `Agent ${agent.name} removed (history kept)` });
+    this.savePending();
+    this.pump();
+  }
+
+  /**
+   * After a restart, tasks that were being worked on go back on the board: no agent is working on them
+   * any more, and a task stuck in "doing" hides the work from everyone.
+   */
+  resumeInterruptedTasks(): number {
+    const tasks = releaseInterruptedTasks();
+    for (const task of tasks) {
+      this.emit(task.owner ?? 'team', {
+        type: 'task', from: 'system',
+        text: `Task ${task.id} [todo]: ${task.title} (the server restarted while it was being worked on)`,
+        data: task,
+      });
+    }
+    return tasks.length;
   }
 
   /** An agent that leaves the office hands its open tasks back to the board. */
@@ -304,53 +416,27 @@ export class SessionManager {
    * they stay in the history.
    */
   async newSession(id: string, clear = false): Promise<AgentEvent> {
+    if (this.removing.has(id)) throw new HttpError(409, 'agent is being removed');
     this.requireAgent(id);
-    await this.interruptAgent(id);
-    const agent = this.requireAgent(id); // re-read: interrupting changed its status
-    delete agent.nativeSessionId;
-    store.updateAgent(agent);
-    this.inbox.delete(id);
-    this.briefed.delete(id);
-    this.clearCeoRequestsForAgent(id);
-    this.setStatus(id, 'idle', clear ? 'idle (cleared)' : 'idle (new session)');
-    return this.emit(id, { type: 'session', from: 'user', text: clear ? 'Session cleared' : 'New session started', data: { clear } });
-  }
-
-  // ---------- worktrees ----------
-
-  private requireWorktree(id: string): Agent & { worktree: NonNullable<Agent['worktree']> } {
-    const agent = this.requireAgent(id);
-    if (!agent.worktree) throw new HttpError(404, `${agent.name} has no worktree (it was not started in a git repo)`);
-    return agent as any;
-  }
-
-  private async gitCall<T>(fn: () => Promise<T>): Promise<T> {
-    try { return await fn(); } catch (err) { if (err instanceof GitError) throw new HttpError(409, err.message); throw err; }
-  }
-
-  async getWorktree(id: string): Promise<WorktreeStatus> {
-    const agent = this.requireWorktree(id);
-    return this.gitCall(() => worktreeStatus(agent.worktree));
-  }
-
-  /** Commit the worker's changes and merge its branch into the repo's checked-out branch. */
-  async mergeWorktree(id: string): Promise<{ merged: string; into: string }> {
-    const agent = this.requireWorktree(id);
-    if (this.running.has(id)) throw new HttpError(409, `${agent.name} is working; wait until it is idle or interrupt it`);
-    const r = await this.gitCall(() => mergeWorktree(agent.worktree, agent.name));
-    store.updateAgent({ ...agent, worktree: r.worktree });
-    this.emit(id, { type: 'message', from: 'user', text: `Merged ${agent.worktree.branch} into ${r.into} (${r.merged.slice(0, 8)})`, data: r });
-    this.queueUpdate(`kenz merged ${agent.name}'s branch ${agent.worktree.branch} into ${r.into}`);
-    return { merged: r.merged, into: r.into };
-  }
-
-  /** Throw away the worker's changes since the last merge. */
-  async discardWorktree(id: string): Promise<void> {
-    const agent = this.requireWorktree(id);
-    if (this.running.has(id)) throw new HttpError(409, `${agent.name} is working; wait until it is idle or interrupt it`);
-    await this.gitCall(() => discardWorktree(agent.worktree));
-    this.emit(id, { type: 'message', from: 'user', text: `Discarded the changes on ${agent.worktree.branch}` });
-    this.queueUpdate(`kenz discarded ${agent.name}'s changes on ${agent.worktree.branch}`);
+    this.pumpPaused++;
+    try {
+      await this.interruptAgent(id);
+      // A CLI that ignored the interrupt is still writing in the old conversation.
+      // Keep its session and task state intact until it actually exits.
+      if (this.running.has(id)) throw new HttpError(409, 'the current turn is still stopping; try starting a new session again after it exits');
+      const agent = this.requireAgent(id); // re-read: interrupting changed its status
+      delete agent.nativeSessionId;
+      store.updateAgent(agent);
+      this.inbox.delete(id);
+      this.briefed.delete(id);
+      this.clearCeoRequestsForAgent(id);
+      this.savePending();
+      this.setStatus(id, 'idle', clear ? 'idle (cleared)' : 'idle (new session)');
+      return this.emit(id, { type: 'session', from: 'user', text: clear ? 'Session cleared' : 'New session started', data: { clear } });
+    } finally {
+      this.pumpPaused--;
+      if (!this.pumpPaused) this.pump();
+    }
   }
 
   // ---------- task board ----------
@@ -367,8 +453,10 @@ export class SessionManager {
   }
 
   addTask(fields: { title: string; owner?: string; status?: TaskStatus; note?: string }, from = 'user'): Task {
+    if (fields.owner !== undefined && typeof fields.owner !== 'string') throw new HttpError(400, 'owner must be a worker name or id');
     const owner = fields.owner ? this.resolve(fields.owner)?.id : undefined;
     if (fields.owner && !owner) throw new HttpError(400, `no agent called "${fields.owner}"`);
+    if (owner && store.getAgent(owner)?.role !== 'worker') throw new HttpError(400, 'tasks can only be assigned to worker agents');
     const task = this.taskCall(() => createTask({ ...fields, owner, by: from }));
     this.emitTask(task, from, 'New task');
     if (from === 'user') {
@@ -378,26 +466,116 @@ export class SessionManager {
     return task;
   }
 
+  getPermissionRequests(): PermissionRequest[] { return listPermissionRequests(); }
+
+  decidePermission(id: string, decision: PermissionDecision, decidedBy = 'user', note = ''): PermissionRequest {
+    if (decision === 'approved' && !note.trim()) throw new HttpError(400, 'approval needs a clear boundary or scope');
+    const current = listPermissionRequests().find(r => r.id === id);
+    if (!current) throw new HttpError(404, `no permission request ${id}`);
+    if (this.removing.has(current.workerId)) throw new HttpError(409, 'agent is being removed');
+    const currentWorker = store.getAgent(current.workerId, true);
+    if (decision === 'approved' && (!currentWorker || currentWorker.archivedAt)) {
+      throw new HttpError(409, `permission request ${id} is stale; its worker is no longer active`);
+    }
+    if (decision === 'approved' && current.taskId) {
+      const task = getTask(current.taskId);
+      if (!task || task.owner !== current.workerId || task.status !== 'blocked') {
+        throw new HttpError(409, `permission request ${id} is stale; its task is no longer blocked and assigned to that worker`);
+      }
+    }
+    let request: PermissionRequest;
+    try { request = decidePermissionRequest(id, decision, decidedBy, note); }
+    catch (err: any) { if (err instanceof ApprovalError) throw new HttpError(400, err.message); throw err; }
+    const worker = store.getAgent(request.workerId, true);
+    if (decision === 'approved' && worker && !worker.archivedAt) {
+      if (request.taskId) {
+        const task = getTask(request.taskId);
+        if (task && task.owner === worker.id && task.status === 'blocked') {
+          const reopened = updateTask(task.id, { status: 'todo', note: `Permission ${id} approved: ${note}` });
+          this.emitTask(reopened, decidedBy, 'Task');
+        }
+      }
+      if (!this.startTurn(worker.id, `[APPROVAL ${id}] Approved: ${note}\nOriginal request: ${request.request}`, decidedBy, request.taskId)) {
+        throw new HttpError(429, 'approval saved but the worker queue is full; it will be retried when capacity is available');
+      }
+      markPermissionRequestApplied(id);
+    } else if (decision === 'declined' && worker && !worker.archivedAt) {
+      this.emit(worker.id, { type: 'message', from: decidedBy, text: `[PERMISSION ${id} DECLINED] ${note || 'The request was declined.'}\nThe related task remains blocked.` });
+    }
+    return request;
+  }
+
+  /** Finish approved requests interrupted between their durable decision and queued turn. */
+  recoverApprovedPermissions(): number {
+    let recovered = 0;
+    for (const request of listPermissionRequests()) {
+      if (request.status !== 'approved' || request.appliedAt) continue;
+      const worker = store.getAgent(request.workerId);
+      const task = request.taskId ? getTask(request.taskId) : undefined;
+      if (!worker || (request.taskId && (!task || task.owner !== worker.id || !['blocked', 'todo'].includes(task.status)))) {
+        markPermissionRequestApplied(request.id);
+        continue;
+      }
+      if (task?.status === 'blocked') {
+        const reopened = updateTask(task.id, { status: 'todo', note: `Permission ${request.id} approved: ${request.decision ?? ''}` });
+        this.emitTask(reopened, request.decidedBy ?? 'system', 'Task');
+      }
+      const marker = `[APPROVAL ${request.id}]`;
+      const alreadyOffered = this.queued.some(turn => turn.agentId === worker.id && turn.prompt.includes(marker))
+        || this.running.get(worker.id)?.prompt.includes(marker);
+      if (alreadyOffered) {
+        markPermissionRequestApplied(request.id);
+        continue;
+      }
+      if (this.startTurn(worker.id, `${marker} Approved: ${request.decision ?? ''}\nOriginal request: ${request.request}`, request.decidedBy ?? 'system', request.taskId)) {
+        markPermissionRequestApplied(request.id);
+        recovered++;
+      }
+    }
+    return recovered;
+  }
+
   editTask(id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }, from = 'user'): Task {
     const before = getTask(id);
     if (!before) throw new HttpError(404, `no task ${id}`);
+    if (patch.owner !== undefined && patch.owner !== null && typeof patch.owner !== 'string') {
+      throw new HttpError(400, 'owner must be a worker name, id, or null');
+    }
     let owner = patch.owner;
     if (owner) {
       const a = this.resolve(owner);
       if (!a) throw new HttpError(400, `no agent called "${owner}"`);
+      if (a.role !== 'worker') throw new HttpError(400, 'tasks can only be assigned to worker agents');
       owner = a.id;
     }
-    const task = this.taskCall(() => updateTask(id, { ...patch, owner }));
+    const nextOwner = owner === undefined ? before.owner : owner || undefined;
+    const ownerChanged = nextOwner !== before.owner;
+    const cancel = ownerChanged || (patch.status !== undefined && patch.status !== before.status && patch.status !== 'doing');
+    const removedPending = cancel ? this.cancelQueuedTask(id) : false;
+    const activeTurn = before.owner ? this.running.get(before.owner) : undefined;
+    const stopActive = Boolean(activeTurn?.taskId === id && cancel);
+    const task = this.taskCall(() => updateTask(id, {
+      ...patch,
+      ...(ownerChanged && patch.status === undefined ? { status: 'todo' as const } : {}),
+      owner,
+    }));
     this.emitTask(task, from, 'Task');
     if (from === 'user') this.queueUpdate(`kenz changed task ${task.id} to ${task.status}: ${task.title}`);
-    // A to-do task handed to a (different) worker starts it, from the board or from the coordinator.
-    if (task.owner && task.owner !== before.owner) this.startAssignedTask(task, from);
+    if (stopActive && activeTurn) {
+      activeTurn.controller.abort();
+      if (task.owner && task.status === 'todo') activeTurn.done.then(() => this.startAssignedTask(task, from));
+    } else if (task.owner && task.status === 'todo' && (ownerChanged || before.status !== 'todo' || removedPending)) {
+      this.startAssignedTask(task, from);
+    }
     return task;
   }
 
   removeTask(id: string): void {
     const task = getTask(id);
     if (!task || !deleteTask(id)) throw new HttpError(404, `no task ${id}`);
+    this.cancelQueuedTask(id);
+    const active = task.owner ? this.running.get(task.owner) : undefined;
+    if (active?.taskId === id) active.controller.abort();
     this.emit(task.owner ?? 'team', { type: 'task', from: 'user', text: `Deleted ${task.id}: ${task.title}`, data: { ...task, deleted: true } });
   }
 
@@ -408,38 +586,118 @@ export class SessionManager {
     }
   }
 
+  private advanceTask(taskId: string | undefined, agentId: string, from: TaskStatus[], to: TaskStatus): void {
+    if (!taskId) return;
+    const task = getTask(taskId);
+    if (task?.owner === agentId && from.includes(task.status)) this.emitTask(updateTask(taskId, { status: to }), 'system', 'Task');
+  }
+
+  private cancelQueuedTask(taskId: string): boolean {
+    const queuedBefore = this.queued.length;
+    this.queued = this.queued.filter(turn => turn.taskId !== taskId);
+    let removed = this.queued.length !== queuedBefore;
+    for (const [agentId, messages] of this.inbox) {
+      const kept = messages.filter(message => !message.startsWith(`[TASK ${taskId}]`));
+      if (kept.length !== messages.length) { removed = true; this.inbox.set(agentId, kept); }
+      if (!kept.length) this.inbox.delete(agentId);
+    }
+    if (removed) this.savePending();
+    return removed;
+  }
+
   /** Start a newly assigned worker task, or queue it behind the worker's current turn. */
   private startAssignedTask(task: Task, from: string): void {
     if (task.status !== 'todo' || !task.owner) return;
     const worker = store.getAgent(task.owner);
     if (!worker || worker.role !== 'worker') return;
     const prompt = `[TASK ${task.id}] ${task.title}`;
-    if (this.running.has(worker.id)) {
-      this.inbox.set(worker.id, [...(this.inbox.get(worker.id) ?? []), prompt]);
-    } else {
-      this.startTurn(worker.id, prompt, from);
+    if (!this.queueTurn(worker.id, prompt, from, task.id)) {
+      this.emit(worker.id, { type: 'error', from: 'system', text: `Could not queue task ${task.id}: the turn queue is full; the task remains on the board` });
+      return;
     }
+    this.pump();
+  }
+
+  /** Bound saved messages per busy agent so a hung turn cannot grow memory or pending.json without limit. */
+  private queueInbox(agentId: string, message: string): boolean {
+    const current = this.inbox.get(agentId) ?? [];
+    if (current.length >= MAX_INBOX_MESSAGES) return false;
+    this.inbox.set(agentId, [...current, message.slice(0, MAX_INBOX_MESSAGE)]);
+    return true;
+  }
+
+  /** Agents sharing a working directory must not edit it at the same time. */
+  private workspaceBusy(cwd: string, kind: string): boolean {
+    if (kind === 'mock') return false; // the mock adapter never runs commands in the working tree
+    const path = this.canonicalCwd(cwd);
+    return [...this.running.keys()].some(id => {
+      const runningAgent = store.getAgent(id, true);
+      if (!runningAgent || runningAgent.kind === 'mock') return false;
+      const other = this.canonicalCwd(runningAgent.cwd);
+      const rel = relative(path, other);
+      const reverse = relative(other, path);
+      const contains = (value: string) => value === '' || (value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value));
+      return contains(rel) || contains(reverse);
+    });
+  }
+
+  private canonicalCwd(cwd: string): string {
+    const path = resolve(cwd);
+    try { return realpathSync(path); } catch { return path; }
+  }
+
+  private queueTurn(agentId: string, prompt: string, from: string, taskId?: string): boolean {
+    if (this.queued.length >= MAX_QUEUED_TURNS) return false;
+    this.queued.push({ agentId, prompt, from, ...(taskId ? { taskId } : {}) });
+    this.savePending();
+    return true;
   }
 
   // ---------- turns ----------
 
-  private startTurn(agentId: string, prompt: string, from = 'user'): void {
+  private startTurn(agentId: string, prompt: string, from = 'user', requestedTaskId?: string): boolean {
+    if (this.stopping) return false; // shutting down: no new work
+    if (this.removing.has(agentId)) return false;
     const agent = this.requireAgent(agentId);
+    const taskId = requestedTaskId ?? prompt.match(/^\[TASK (t\d+)\]/)?.[1];
     const adapter = getAdapter(agent.kind);
     if (!adapter) {
       this.emit(agentId, { type: 'error', text: `Unknown adapter: ${agent.kind}` });
       this.setStatus(agentId, 'error', `unknown adapter ${agent.kind}`);
-      return;
+      return false;
     }
-    // Too many turns at once slow every agent down and burn tokens; wait for a free slot.
-    if (!this.running.has(agentId) && this.running.size >= maxConcurrentTurns()) {
-      this.emit(agentId, { type: 'error', text: `Too many agents are working at once (${maxConcurrentTurns()}). Try again when one of them is done.` });
-      this.setStatus(agentId, 'idle', 'idle');
-      return;
+    // Never start a replacement while the previous CLI is still exiting; abort is asynchronous.
+    const current = this.running.get(agentId);
+    if (current) {
+      if (!this.queueTurn(agentId, prompt, from, taskId)) {
+        this.emit(agentId, { type: 'error', text: `Too many turns are waiting (${MAX_QUEUED_TURNS}); this one was not started: ${oneLine(prompt, 120)}` });
+        return false;
+      }
+      this.emit(agentId, { type: 'message', from: 'system', text: `Queued until the current turn stops: ${oneLine(prompt, 120)}` });
+      current.controller.abort();
+      return true;
     }
 
-    // Two steers racing each other: never leave an older turn's process running untracked.
-    this.running.get(agentId)?.controller.abort();
+    // Too many turns at once slow every agent down and burn tokens: queue the turn until a slot frees.
+    // Dropping it instead would lose a task the coordinator just handed out (and leave it on the board
+    // forever), which is the worst thing a harness can do with work.
+    const workspaceBusy = this.workspaceBusy(agent.cwd, agent.kind);
+    if (this.running.size >= maxConcurrentTurns() || workspaceBusy) {
+      if (!this.queueTurn(agentId, prompt, from, taskId)) {
+        this.emit(agentId, { type: 'error', text: `Too many turns are waiting (${MAX_QUEUED_TURNS}); this one was not started: ${oneLine(prompt, 120)}` });
+        this.setStatus(agentId, 'idle', 'idle');
+        return false;
+      }
+      const waiting = this.queued.length;
+      this.emit(agentId, {
+        type: 'message', from: 'system',
+        text: workspaceBusy
+          ? `Queued: another agent is using this working directory, so this one waits (${waiting} waiting): ${oneLine(prompt, 120)}`
+          : `Queued: ${maxConcurrentTurns()} turns are already running, so this one waits (${waiting} waiting): ${oneLine(prompt, 120)}`,
+      });
+      this.setStatus(agentId, 'idle', `queued (${waiting} waiting for a turn slot)`);
+      return true;
+    }
 
     const controller = new AbortController();
     const { signal } = controller;
@@ -452,7 +710,8 @@ export class SessionManager {
       instructions = [commands, roleGuide(agent.role)].filter(Boolean).join('\n\n') || undefined;
     }
     this.briefed.set(agentId, agent.role);
-    if (agent.role === 'worker') this.advanceTasks(agentId, ['todo', 'review', 'blocked'], 'doing');
+    // A blocked task stays blocked until a human or the coordinator explicitly reopens it.
+    if (agent.role === 'worker') this.advanceTask(taskId, agentId, ['todo', 'review'], 'doing');
 
     // The agent has to learn what came of the commands it wrote last time.
     const query = prompt;
@@ -492,7 +751,7 @@ export class SessionManager {
     // A turn that never ends must not hold the office hostage: after the timeout it is stopped,
     // the agent is marked as failed and its task is blocked.
     const timeout = turnTimeoutMs();
-    const timer = timeout > 0 ? setTimeout(() => { controller.abort(); this.onTurnTimeout(agentId); }, timeout) : undefined;
+    const timer = timeout > 0 ? setTimeout(() => this.onTurnTimeout(agentId, controller), timeout) : undefined;
     timer?.unref();
 
     const done = (async () => {
@@ -516,34 +775,109 @@ export class SessionManager {
       if (!store.getAgent(agentId)) return; // removed meanwhile
 
       if (signal.aborted) {
-        this.setStatus(agentId, 'stopped', 'interrupted');
+        if (current?.timedOut) this.setStatus(agentId, 'error', `error: ${current.timeoutMessage ?? 'turn timed out'}`);
+        else this.setStatus(agentId, 'stopped', 'interrupted');
       } else if (failure) {
         this.emit(agentId, { type: 'error', text: failure });
         this.setStatus(agentId, 'error', `error: ${oneLine(failure, 80)}`);
       } else {
         this.setStatus(agentId, 'idle', 'idle');
       }
-      this.onTurnEnd(agentId, signal.aborted, failure);
+      this.onTurnEnd(agentId, signal.aborted, failure, current?.taskId);
+      this.pump(); // a slot just freed: whatever was waiting can start now
+      this.savePending();
     })();
 
-    this.running.set(agentId, { controller, done });
+    // The journal keeps the instruction as asked for (`query`), not with the context blocks added below:
+    // a restored turn goes through this same path again and would otherwise get them twice.
+    this.running.set(agentId, { controller, done, prompt: query, from, startedAt: Date.now(), ...(taskId ? { taskId } : {}) });
+    this.savePending();
+    return true;
   }
 
   /** A turn ran for too long: stop it, say so, and block the task it was working on. */
-  private onTurnTimeout(agentId: string): void {
+  private onTurnTimeout(agentId: string, controller: AbortController): void {
     const agent = store.getAgent(agentId);
-    if (!agent) return;
-    this.running.delete(agentId);
+    const turn = this.running.get(agentId);
+    if (!agent || !turn || turn.controller !== controller || turn.timedOut) return;
+    turn.timedOut = true;
     this.lastTurnEnd.set(agentId, Date.now());
     const ms = turnTimeoutMs();
     const span = ms < 60_000
       ? `${Math.max(1, Math.round(ms / 1000))} second${Math.round(ms / 1000) === 1 ? '' : 's'}`
       : `${Math.max(1, Math.round(ms / 60_000))} minute${Math.round(ms / 60_000) === 1 ? '' : 's'}`;
     const msg = `the turn ran for more than ${span} and was stopped`;
+    turn.timeoutMessage = msg;
+    controller.abort();
     this.emit(agentId, { type: 'error', from: 'system', text: msg });
-    this.setStatus(agentId, 'error', `error: ${msg}`);
-    this.advanceTasks(agentId, ['doing'], 'blocked');
+    // Keep the turn registered while the child process group exits. That keeps its workspace
+    // reserved and prevents a replacement from writing beside a CLI that ignored the timeout.
+    this.setStatus(agentId, 'working', 'stopping after timeout…');
+    this.advanceTask(turn.taskId, agentId, ['doing'], 'blocked');
     this.queueUpdate(`${agent.name} (${agent.id}) timed out after ${span}`);
+    // The instructions queued behind that turn will never run now: say so instead of keeping them
+    // (or, worse, starting them straight after a timeout) and give the free slot to someone else.
+    this.dropPending(agentId, 'the turn timed out');
+  }
+
+  /**
+   * Start queued turns while there is room, oldest first. Called whenever a turn ends, times out or is
+   * cancelled. A queued turn for an agent that got another turn meanwhile becomes that agent's inbox.
+   */
+  private pump(): void {
+    if (this.pumpPaused) return;
+    let changed = false;
+    while (!this.stopping && this.queued.length && this.running.size < maxConcurrentTurns()) {
+      const index = this.queued.findIndex(next => {
+        if (this.removing.has(next.agentId)) return true;
+        const agent = store.getAgent(next.agentId);
+        if (!agent) return true;
+        if (this.running.has(next.agentId)) {
+          if (next.taskId) return false; // task assignments keep their identity and wait for a fresh turn
+          return (this.inbox.get(next.agentId)?.length ?? 0) < MAX_INBOX_MESSAGES;
+        }
+        return !this.workspaceBusy(agent.cwd, agent.kind);
+      });
+      if (index < 0) break;
+      const [next] = this.queued.splice(index, 1);
+      changed = true;
+      if (this.removing.has(next.agentId)) continue;
+      if (!store.getAgent(next.agentId)) continue; // the agent left the office meanwhile
+      if (this.running.has(next.agentId)) {
+        this.queueInbox(next.agentId, next.prompt);
+        continue;
+      }
+      this.startTurn(next.agentId, next.prompt, next.from, next.taskId);
+    }
+    if (changed) this.savePending();
+    // Approved requests that couldn't enter a full queue remain durable and are retried here.
+    this.recoverApprovedPermissions();
+  }
+
+  /**
+   * Instructions that can no longer run (the agent timed out): name them instead of forgetting them,
+   * so the coordinator and the task board do not silently lose the work.
+   */
+  private dropPending(agentId: string, why: string): void {
+    const pending = [...(this.inbox.get(agentId) ?? [])];
+    this.inbox.delete(agentId);
+    const kept: QueuedTurn[] = [];
+    for (const q of this.queued) {
+      if (q.agentId !== agentId) { kept.push(q); continue; }
+      pending.push(q.prompt);
+      if (q.taskId) {
+        const task = getTask(q.taskId);
+        if (task?.owner === agentId && task.status === 'todo') {
+          this.emitTask(updateTask(task.id, { status: 'blocked', note: `Not started because ${why}; reopen to retry.` }), 'system', 'Task');
+        }
+      }
+    }
+    this.queued = kept;
+    this.savePending();
+    if (!pending.length) return;
+    const text = `${pending.length} instruction(s) were not run (${why}): ${pending.map(p => `"${oneLine(p, 120)}"`).join(', ')}`;
+    this.emit(agentId, { type: 'error', from: 'system', text });
+    this.queueUpdate(text);
   }
 
   /** Stop the current turn: abort -> SIGINT, then SIGTERM after the grace period. */
@@ -556,19 +890,29 @@ export class SessionManager {
     }
     turn.controller.abort();
     let timer: NodeJS.Timeout | undefined;
-    await Promise.race([turn.done, new Promise(r => { timer = setTimeout(r, KILL_GRACE_MS + 2000); })]);
+    // SIGINT, then SIGTERM, then SIGKILL: wait long enough for all three.
+    let finished = false;
+    await Promise.race([turn.done.then(() => { finished = true; }), new Promise(r => { timer = setTimeout(r, KILL_GRACE_MS * 2 + 2000); })]);
     clearTimeout(timer);
-    if (this.running.get(agentId) === turn) {
-      // The process didn't exit in time; stop tracking it so the agent can be steered again.
-      this.running.delete(agentId);
-      this.emit(agentId, { type: 'error', text: 'turn did not stop within the grace period' });
-      this.setStatus(agentId, 'stopped', 'interrupted');
+    if (!finished && this.running.get(agentId) === turn) {
+      // Keep the worker and its workspace occupied until the process group is actually gone.
+      this.emit(agentId, { type: 'error', text: 'turn did not stop within the grace period; it remains tracked until the CLI exits' });
+      this.setStatus(agentId, 'working', 'waiting for the interrupted CLI to exit…');
+      this.savePending();
+    }
+    if (turn.taskId) {
+      const task = getTask(turn.taskId);
+      const nextTurn = this.running.get(agentId);
+      if (finished && task?.owner === agentId && task.status === 'doing' && nextTurn?.taskId !== turn.taskId) {
+        this.emitTask(updateTask(task.id, { status: 'todo', note: 'Interrupted before completion; the worker can continue on the next turn.' }), 'system', 'Task');
+      }
     }
   }
 
   /** Interrupt if busy, then start a new turn (resuming the native session) with `text`. */
   async steerAgent(agentId: string, text: string, from = 'user'): Promise<AgentEvent> {
     if (!text) throw new HttpError(400, 'text is required');
+    if (this.removing.has(agentId)) throw new HttpError(409, 'agent is being removed');
     const agent = this.requireAgent(agentId);
     const event = this.emit(agentId, { type: 'steer', from, text });
 
@@ -578,14 +922,38 @@ export class SessionManager {
       this.queueUpdate(`${who} steered ${agent.name} (${agent.id}): "${oneLine(text, 200)}"`);
     }
 
-    if (this.running.has(agentId)) await this.interruptAgent(agentId);
-    this.startTurn(agentId, text, from);
-    return event;
+    const taskId = this.running.get(agentId)?.taskId;
+    const sequence = (this.steerSequence.get(agentId) ?? 0) + 1;
+    this.steerSequence.set(agentId, sequence);
+    this.pumpPaused++;
+    try {
+      if (this.running.has(agentId)) await this.interruptAgent(agentId);
+      if (this.steerSequence.get(agentId) !== sequence || this.removing.has(agentId)) return event;
+      this.startTurn(agentId, text, from, taskId);
+      return event;
+    } finally {
+      this.pumpPaused--;
+      if (!this.pumpPaused) this.pump();
+    }
   }
 
-  /** Abort every running turn (server shutdown). */
+  /**
+   * Abort every running turn (server shutdown). No queued or follow-up turn may start meanwhile, but
+   * nothing is forgotten either: the running turns and the queue stay in the journal for the next server.
+   */
   async shutdown(): Promise<void> {
-    await Promise.all([...this.running.keys()].map(id => this.interruptAgent(id).catch(() => {})));
+    this.stopping = true;
+    if (!this.stoppedTurns.length) {
+      this.stoppedTurns = [...this.running.entries()].filter(([, turn]) => !turn.timedOut).map(([agentId, turn]) => ({
+        agentId, prompt: turn.prompt, from: turn.from, startedAt: turn.startedAt, ...(turn.taskId ? { taskId: turn.taskId } : {}),
+      }));
+    }
+    this.savePending(); // before the turns are aborted: their done handlers must not erase the journal
+    const turns = [...this.running.entries()];
+    await Promise.all(turns.map(([id]) => this.interruptAgent(id).catch(() => {})));
+    // Keep shutdown (and the data-folder lock) open until every adapter confirms its process group
+    // has exited. Otherwise a new server can start while an old CLI is still editing the workspace.
+    await Promise.all(turns.map(([, turn]) => turn.done));
     if (this.updateTimer) clearTimeout(this.updateTimer);
     for (const pending of this.pendingCeoRequests.values()) if (pending.timer) clearTimeout(pending.timer);
     this.pendingCeoRequests.clear();
@@ -596,14 +964,106 @@ export class SessionManager {
     await this.shutdown();
     this.pendingUpdates = [];
     this.inbox.clear();
+    this.queued = [];
     this.briefed.clear();
     for (const agent of store.getAgents()) {
-      if (agent.worktree) {
-        try { removeWorktree(agent.worktree, agent.name); } catch { /* keep the user's repository safe */ }
-      }
       store.removeAgent(agent.id);
     }
     store.reset();
+    this.stoppedTurns = [];
+    clearPendingWork();
+    this.stopping = false; // the office is empty again and may take new work
+  }
+
+  // ---------- work in flight ----------
+
+  /**
+   * Write what is running, queued or waiting to $AGENTIX_HOME/pending.json. Every turn start and end
+   * and every queue/inbox change does this, so even a killed process leaves its work on disk.
+   */
+  private savePending(): void {
+    const interrupted: PendingTurn[] = this.stopping
+      ? this.stoppedTurns
+      : [...this.running.entries()].filter(([, turn]) => !turn.timedOut).map(([agentId, turn]) => ({
+        agentId, prompt: turn.prompt, from: turn.from, startedAt: turn.startedAt, ...(turn.taskId ? { taskId: turn.taskId } : {}),
+      }));
+    const inbox: Record<string, string[]> = {};
+    for (const [agentId, messages] of this.inbox) if (messages.length) inbox[agentId] = messages;
+    const commandResults: Record<string, string[]> = {};
+    for (const [agentId, lines] of this.commandResults) if (lines.length) commandResults[agentId] = lines.slice(-50);
+    try {
+      writePendingWork({
+        interrupted: interrupted.map(t => ({ ...t })),
+        queued: this.queued.map(q => ({ ...q })),
+        inbox,
+        commandResults,
+      });
+    } catch (err: any) {
+      // A full or read-only home must not break the turn that is starting.
+      if (!this.warnedPending) {
+        this.warnedPending = true;
+        console.error(`agentix: cannot save the work in flight (${err?.message ?? err}); a restart would lose it`);
+      }
+    }
+  }
+
+  /**
+   * Offer the work a previous server was running, had queued or was holding again. Called once at
+   * startup, after the CLIs the dead server left behind are stopped. Returns how many turns were re-offered.
+   */
+  resumePendingTurns(): number {
+    if (this.resumed) return 0;
+    this.resumed = true;
+    const work = readPendingWork();
+    if (!work) return 0;
+    this.stoppedTurns = [];
+    let dropped = 0;
+    // The interrupted turns come first, then the ones that were queued behind them, in order.
+    const restored = [
+      ...work.interrupted.map(turn => ({ turn, wasRunning: true })),
+      ...work.queued.map(turn => ({ turn, wasRunning: false })),
+    ];
+    for (const { turn, wasRunning } of restored) {
+      if (!store.getAgent(turn.agentId)) { dropped++; continue; } // that agent was removed meanwhile
+      this.emit(turn.agentId, {
+        type: 'message', from: 'system',
+        text: wasRunning
+          ? `The server restarted while this agent was working; its turn is offered again: ${oneLine(withoutRestartNote(turn.prompt), 200)}`
+          : `The server restarted before this waiting turn could start; it runs now: ${oneLine(withoutRestartNote(turn.prompt), 200)}`,
+      });
+      this.queued.push({
+        agentId: turn.agentId,
+        prompt: wasRunning ? interruptedTurnPrompt(turn.prompt) : turn.prompt,
+        from: turn.from,
+        ...(turn.taskId ? { taskId: turn.taskId } : {}),
+      });
+    }
+    for (const [agentId, messages] of Object.entries(work.inbox)) {
+      if (!messages.length || !store.getAgent(agentId)) continue;
+      for (const message of messages) this.queueInbox(agentId, message);
+      this.emit(agentId, {
+        type: 'message', from: 'system',
+        text: `The server restarted; ${messages.length} waiting message(s) are delivered now`,
+      });
+    }
+    // The agent still learns what came of the commands it wrote before the restart.
+    for (const [agentId, lines] of Object.entries(work.commandResults)) {
+      if (!lines.length || !store.getAgent(agentId)) continue;
+      this.commandResults.set(agentId, [...(this.commandResults.get(agentId) ?? []), ...lines]);
+    }
+    // Say what this server took over before starting anything, so a crash halfway through loses nothing.
+    this.savePending();
+    this.pump();
+    // An idle agent with a waiting message starts a turn with it, the same rule a message sent after
+    // a turn ends follows.
+    for (const [agentId, messages] of [...this.inbox]) {
+      if (!messages.length || this.running.has(agentId)) continue;
+      this.inbox.delete(agentId);
+      this.startTurn(agentId, messages.join('\n\n'), 'system');
+    }
+    this.savePending();
+    if (dropped) console.log(`agentix: dropped ${dropped} saved turn(s) for agents that were removed`);
+    return restored.length - dropped;
   }
 
   // ---------- coordinator updates ----------
@@ -612,12 +1072,15 @@ export class SessionManager {
     return store.getAgents().find(a => a.role === role);
   }
 
-  private onTurnEnd(agentId: string, aborted: boolean, failure?: string): void {
+  private onTurnEnd(agentId: string, aborted: boolean, failure?: string, taskId?: string): void {
     this.lastTurnEnd.set(agentId, Date.now());
     const agent = store.getAgent(agentId);
     if (!agent) return;
     const waiting = this.inbox.get(agentId);
-    if (waiting?.length && !aborted) {
+    // A replacement steer or an approval can arrive while an uncooperative CLI
+    // is still exiting. Once that process is gone, deliver the waiting message
+    // even though the old turn ended by aborting.
+    if (waiting?.length) {
       this.inbox.delete(agentId);
       this.startTurn(agentId, waiting.join('\n\n'), 'system');
     }
@@ -629,8 +1092,19 @@ export class SessionManager {
       if (this.pendingUpdates.length) this.scheduleFlush();
       return;
     }
-    if (agent.role !== 'worker' || aborted) return; // steers/stops already produced their own update
-    this.advanceTasks(agentId, ['doing'], failure ? 'blocked' : 'review');
+    if (agent.role !== 'worker') return;
+    if (aborted) {
+      if (taskId) {
+        const task = getTask(taskId);
+        const replacementQueued = this.queued.some(turn => turn.agentId === agentId && turn.taskId === taskId);
+        const replacementRunning = this.running.get(agentId)?.taskId === taskId;
+        if (task?.owner === agentId && task.status === 'doing' && !replacementQueued && !replacementRunning) {
+          this.emitTask(updateTask(taskId, { status: 'todo', note: 'Interrupted before completion; the worker can continue on the next turn.' }), 'system', 'Task');
+        }
+      }
+      return; // steers/stops already produced their own update
+    }
+    this.advanceTask(taskId, agentId, ['doing'], failure ? 'blocked' : 'review');
     if (failure) {
       this.queueUpdate(`${agent.name} (${agent.id}) failed: ${oneLine(failure, 200)}`);
     } else {
@@ -694,12 +1168,14 @@ export class SessionManager {
     const results = this.commandResults.get(agentId) ?? [];
     results.push(line);
     this.commandResults.set(agentId, results);
+    this.savePending();
   }
 
   private takeCommandResults(agentId: string): string[] {
     const results = this.commandResults.get(agentId);
     if (!results?.length) return [];
     this.commandResults.delete(agentId);
+    this.savePending();
     return results;
   }
 
@@ -729,7 +1205,7 @@ export class SessionManager {
     this.startTurn(agentId, '[AGENTIX] One of your commands did not go through: see [COMMAND RESULTS].', 'system');
   }
 
-  /** Run the @@ commands in an agent's output: @@remember from anyone, the rest from the coordinator or CEO. */
+  /** Workers can update their own tasks and ask the coordinator; leads can run team commands. */
   private runCommands(sourceId: string, text: string): void {
     const source = store.getAgent(sourceId);
     if (!source) return;
@@ -745,6 +1221,48 @@ export class SessionManager {
     if (source.role === 'worker') {
       // A worker may move its own tasks (e.g. "@@task t3 status=done").
       for (const c of parsed.commands) {
+        if (c.op === 'tell') {
+          const coordinator = this.findRole('coordinator');
+          const isPermissionRequest = /\bPERMISSION REQUEST\s*:/i.test(c.text);
+          const isCoordinator = [coordinator?.id, coordinator?.name.toLowerCase(), 'coordinator']
+            .filter((value): value is string => Boolean(value)).includes(c.target.toLowerCase());
+          if (!isCoordinator) {
+            const msg = `${c.line}: workers may only message the coordinator`;
+            this.emit(sourceId, { type: 'error', from: 'system', text: msg });
+            this.addCommandResult(sourceId, msg);
+            continue;
+          }
+          if (isPermissionRequest) {
+            const taskId = this.running.get(sourceId)?.taskId;
+            let request: PermissionRequest;
+            try { request = createPermissionRequest({ workerId: sourceId, taskId, request: c.text }); }
+            catch (err: any) {
+              this.advanceTask(taskId, sourceId, ['doing'], 'blocked');
+              this.running.get(sourceId)?.controller.abort();
+              this.emit(sourceId, { type: 'error', from: 'system', text: `Permission request could not be saved (${err?.message ?? err}); the task is paused and needs human review.` });
+              continue;
+            }
+            this.advanceTask(taskId, sourceId, ['doing'], 'blocked');
+            // Persist first, then stop the current CLI turn; a decision resumes it as a fresh turn.
+            this.running.get(sourceId)?.controller.abort();
+            if (coordinator && getSettings().coordinatorMode !== 'human') {
+              try {
+                this.tellAgent(source, coordinator, `[PERMISSION REQUEST ${request.id}] from ${source.name} (${source.id})${taskId ? ` on task ${taskId}` : ''}:\n${c.text}`);
+                this.emit(sourceId, { type: 'message', from: 'system', text: `Task paused; permission request ${request.id} sent to ${coordinator.name}.` });
+              } catch (err: any) {
+                this.emit(sourceId, { type: 'message', from: 'system', text: `Task paused; request ${request.id} is saved, but the coordinator could not receive it (${err?.message ?? err}). Review it on the Tasks page.` });
+              }
+            } else {
+              const reason = coordinator ? 'coordinator mode is set to human' : 'no coordinator agent is available';
+              this.emit(sourceId, { type: 'message', from: 'system', text: `Task paused; ${reason}. Permission request ${request.id} is saved for human review on the Tasks page.` });
+            }
+            continue;
+          }
+          queueMicrotask(() => this.runCommand(source, c)
+            .then(result => this.reportCommand(source, c, result))
+            .catch(err => this.reportCommand(source, c, '', err?.message ?? String(err))));
+          continue;
+        }
         if (c.op !== 'task' || !c.id) continue;
         const t = getTask(c.id);
         if (!t || t.owner !== source.id) {
@@ -813,6 +1331,13 @@ export class SessionManager {
 
     switch (c.op) {
       case 'remember': return 'saved to shared context'; // handled in runCommands
+      case 'approve':
+      case 'decline': {
+        if (source.role !== 'coordinator') throw new Error('only the coordinator can decide permission requests');
+        const decision = c.op === 'approve' ? 'approved' : 'declined';
+        const request = this.decidePermission(c.id, decision, source.id, c.text);
+        return `${decision} permission request ${request.id}`;
+      }
       case 'task': {
         const status = c.opts.status as TaskStatus | undefined;
         if (status && !TASK_STATUSES.includes(status)) throw new Error(`status must be one of ${TASK_STATUSES.join(', ')}`);
@@ -829,18 +1354,17 @@ export class SessionManager {
         const role = (o.role as Role | undefined) ?? 'worker';
         if (role !== 'worker') throw new Error('the coordinator can only spawn workers');
         const avatarId = o.avatar === undefined || o.avatar === 'random' ? 'random' : Number(o.avatar);
-        const worktree = o.worktree === undefined ? undefined : !/^(no|false|off|0)$/i.test(o.worktree);
         const model = cleanModel(o.model);
         if (model) {
           const modelError = await unavailableModelError(o.kind, model);
           if (modelError) throw new Error(modelError);
         }
         // The task goes on the board before the worker starts, so its first turn moves it to doing.
-        const created = await this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, worktree, model });
+        const created = await this.createAgent(o.kind, { name: o.name, avatarId, cwd: o.cwd, from: source.id, model });
         if (c.text) {
-          this.addTask({ title: oneLine(c.text, 140), owner: created.id, status: 'todo' }, source.id);
+          const task = this.addTask({ title: oneLine(c.text, 140), owner: created.id, status: 'todo' }, source.id);
           this.emit(created.id, { type: 'message', from: source.id, text: c.text });
-          this.startTurn(created.id, c.text, source.id);
+          this.startTurn(created.id, c.text, source.id, task.id);
         }
         return `spawned ${created.name} (${created.id})`;
       }
@@ -852,7 +1376,7 @@ export class SessionManager {
         // @@tell so that a harmless wording mismatch does not lose the delegation update
         // or interrupt the CEO's current turn.
         if (target.role === 'ceo') {
-          this.tellCeo(source, target, c.text);
+          this.tellAgent(source, target, c.text);
           return `told the CEO (${target.name})`;
         }
         await this.steerAgent(target.id, c.text, source.id);
@@ -867,22 +1391,38 @@ export class SessionManager {
         return `stopped ${target.name} (${target.id})`;
       }
       case 'tell': {
+        // A message, not an instruction: it never cuts the target's current turn short. Sent to a
+        // busy agent it waits in its inbox, so "tell a working worker something" is not an error.
         const target = this.resolve(c.target);
         if (!target) throw new Error(`no agent called "${c.target}"`);
-        if (target.role !== 'ceo') throw new Error('use "@@steer <worker> :: ..." to direct workers');
-        this.tellCeo(source, target, c.text);
-        return `told the CEO (${target.name})`;
+        if (target.id === source.id) throw new Error('an agent cannot message itself');
+        this.tellAgent(source, target, c.text);
+        return `told ${target.name} (${target.id})`;
       }
     }
   }
 
-  /** Deliver a coordinator report to the CEO without interrupting an active CEO turn. */
-  private tellCeo(source: Agent, target: Agent, text: string): void {
-    this.clearCeoRequest(target.id, source.id);
+  /**
+   * Send a message from one agent to another without interrupting it. A busy target reads it at the
+   * start of its next turn (its inbox); an idle one starts a turn with it.
+   */
+  private tellAgent(source: Agent, target: Agent, text: string): void {
+    const runningTurn = this.running.get(target.id);
+    const waitsForExit = Boolean(runningTurn?.controller.signal.aborted);
+    if (runningTurn && waitsForExit && this.queued.length >= MAX_QUEUED_TURNS) {
+      throw new HttpError(429, `${target.name} is stopping and the turn queue is full; try again shortly`);
+    }
+    if (runningTurn && !waitsForExit && (this.inbox.get(target.id)?.length ?? 0) >= MAX_INBOX_MESSAGES) {
+      throw new HttpError(429, `${target.name}'s inbox is full; try again after its current turn`);
+    }
+    if (target.role === 'ceo') this.clearCeoRequest(target.id, source.id);
     this.emit(target.id, { type: 'message', from: source.id, text });
-    const msg = `[FROM COORDINATOR ${source.name}]\n${text}`;
-    if (this.running.has(target.id)) {
-      this.inbox.set(target.id, [...(this.inbox.get(target.id) ?? []), msg]);
+    const msg = `[FROM ${source.role.toUpperCase()} ${source.name}]\n${text}`;
+    if (runningTurn && waitsForExit) {
+      this.queueTurn(target.id, msg, source.id);
+    } else if (runningTurn) {
+      this.queueInbox(target.id, msg);
+      this.savePending();
     } else {
       this.startTurn(target.id, msg, source.id);
     }
@@ -964,8 +1504,7 @@ export class SessionManager {
     return agents.map(a => {
       const last = store.getAgentEvents(a.id, 0, 50).filter(e => e.type === 'output').pop();
       const out = last?.text ? `\n    last output: ${oneLine(last.text, 200)}` : '';
-      const branch = a.worktree ? ` [branch ${a.worktree.branch}]` : '';
-      return `- ${a.name} (${a.id}, ${a.kind}, ${a.role})${branch}: ${a.status} — ${a.activity}${out}`;
+      return `- ${a.name} (${a.id}, ${a.kind}, ${a.role}): ${a.status} — ${a.activity}${out}`;
     }).join('\n') + tasks;
   }
 }

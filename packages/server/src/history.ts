@@ -22,22 +22,33 @@ export function historyDir(home: string): string {
 const pending = new Map<string, string[]>();
 let flushTimer: NodeJS.Timeout | undefined;
 let exitHooked = false;
+/** The write in progress, so flushes append in order and a flush never returns before the disk has them. */
+let writing: Promise<void> = Promise.resolve();
 
 const FLUSH_MS = 200;
 
-/** Write everything that is still waiting on disk. */
+/**
+ * Write everything that is still waiting on disk. Flushes are serialized: a background flush that is
+ * already writing must finish first, so lines keep their order and a caller that awaits this sees every
+ * line that was buffered before the call (and not just the ones no other flush had taken yet).
+ */
 export async function flushHistory(): Promise<void> {
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
   const writes = [...pending.entries()];
   pending.clear();
-  for (const [path, lines] of writes) {
-    if (!lines.length) continue;
-    try {
-      await appendFile(path, lines.join(''));
-    } catch (err: any) {
-      warnOnce(path, err);
-    }
+  if (writes.length) {
+    writing = writing.then(async () => {
+      for (const [path, lines] of writes) {
+        if (!lines.length) continue;
+        try {
+          await appendFile(path, lines.join(''));
+        } catch (err: any) {
+          warnOnce(path, err);
+        }
+      }
+    });
   }
+  await writing;
 }
 
 const warned = new Set<string>();

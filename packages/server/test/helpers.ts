@@ -13,6 +13,7 @@ mkdirSync(WORK);
 
 process.env.AGENTIX_HOME = join(TMP, 'home');
 process.env.AGENTIX_MOCK = '1';
+process.env.AGENTIX_AUTH = 'off';
 process.env.AGENTIX_MOCK_STEP_MS = '20';
 process.env.AGENTIX_UPDATE_DELAY_MS = '100';
 process.env.AGENTIX_CEO_REPLY_TIMEOUT_MS = '1000';
@@ -41,6 +42,7 @@ if [ "$1" = "--version" ]; then echo "${name} 9.9.9-fake"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "usage: ${name} [options] -p --mode json --append-system-prompt <text>"; exit 0; fi
 [ -n "$FAKE_IGNORE_INT" ] && trap '' INT
 { printf '%s\\0' "$@"; printf '\\n'; } >> "${join(TMP, name + '.args')}"
+node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\\n")' -- "$@" >> "${join(TMP, name + '.calls')}"
 echo "$(pwd -P) $PWD" >> "${join(TMP, name + '.cwd')}"
 ${body.split('\n')[0]}
 if [ -n "$FAKE_HANG" ]; then sleep 30; sleep 30; fi
@@ -109,6 +111,7 @@ if [ -n "$FAKE_FAIL" ]`));
 writeFileSync(join(BIN, 'hermes'), `#!/bin/bash
 if [ "$1" = "--version" ]; then echo "Hermes Agent v9.9.9-fake (2026.7.20)"; exit 0; fi
 { printf '%s\\0' "$@"; printf '\\n'; } >> "${join(TMP, 'hermes.args')}"
+node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\\n")' -- "$@" >> "${join(TMP, 'hermes.calls')}"
 echo "  ⚠ tirith security scanner enabled but not available"
 echo "Hello from Hermes."
 echo "Second line."
@@ -175,9 +178,9 @@ fake('goose', [
 
 /** argv of each call to a fake CLI */
 export function fakeCalls(name: string): string[][] {
-  const p = join(TMP, name + '.args');
+  const p = join(TMP, name + '.calls');
   if (!existsSync(p)) return [];
-  return readFileSync(p, 'utf-8').split('\n').filter(Boolean).map(l => l.split('\0').filter(Boolean));
+  return readFileSync(p, 'utf-8').split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
 
 export function fakeCwds(name: string): string[] {

@@ -31,7 +31,9 @@ test('codex: streams output and tools, saves thread id, steer resumes it', async
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'th-fake-1');
   assert.deepEqual(texts(events(a.id, 'output')), ['Done.']);
   assert.deepEqual(texts(events(a.id, 'tool')), ['$ bash -lc ls', 'files: add /w/hello.txt']);
-  assert.deepEqual(fakeCalls('codex')[0], ['exec', '--json', '--skip-git-repo-check', '-s', 'workspace-write', '-C', WORK, '--', 'create hello.txt']);
+  const firstCall = fakeCalls('codex')[0]!;
+  assert.deepEqual(firstCall.slice(0, -1), ['exec', '--json', '--skip-git-repo-check', '-s', 'workspace-write', '-C', WORK, '--']);
+  assert.match(firstCall.at(-1)!, /\[PERMISSION PROTOCOL\][\s\S]*create hello\.txt$/);
   assert.equal(fakeCwds('codex')[0], `${realpathSync(WORK)} ${WORK}`, 'cwd and $PWD are the agent cwd');
   assert.deepEqual(usages(a.id), [{ input: 12840, output: 356, cacheRead: 11008 }], 'turn.completed usage, once');
 
@@ -43,13 +45,36 @@ test('codex: streams output and tools, saves thread id, steer resumes it', async
   assert.equal(usages(a.id).length, 2, 'one usage event per turn');
 });
 
+test('new session resets native state before starting a queued task', async () => {
+  const callIndex = fakeCalls('codex').length;
+  process.env.FAKE_HANG = '1';
+  const agent = await sm.createAgent('codex', { cwd: WORK, prompt: 'keep the old session busy' });
+  try {
+    await waitFor(() => Boolean(sm.getAgent(agent.id)?.nativeSessionId) && sm.isRunning(agent.id), 5000, 'first CLI session started');
+    sm.addTask({ title: 'run on a fresh session', owner: agent.id });
+    delete process.env.FAKE_HANG; // the queued turn should finish normally after the reset
+
+    await sm.newSession(agent.id);
+    await settled(agent.id);
+    const first = fakeCalls('codex')[callIndex]!;
+    const queued = fakeCalls('codex')[callIndex + 1]!;
+    assert.ok(!first.includes('resume'));
+    assert.ok(!queued.includes('resume'), 'the queued task starts after nativeSessionId is cleared');
+  } finally {
+    delete process.env.FAKE_HANG;
+    await sm.removeAgent(agent.id).catch(() => {});
+  }
+});
+
 test('opencode: streams, saves sessionID, steer passes -s', async () => {
   const a = await sm.createAgent('opencode', { cwd: WORK, prompt: 'say ok' });
   await settled(a.id);
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, 'ses_fake1');
   assert.deepEqual(texts(events(a.id, 'output')), ['ok']);
   assert.deepEqual(texts(events(a.id, 'tool')), ['shell: echo hi > x.txt']);
-  assert.deepEqual(fakeCalls('opencode')[0], ['run', '--standalone', '--format', 'json', '--auto', 'say ok']);
+  const firstCall = fakeCalls('opencode')[0]!;
+  assert.deepEqual(firstCall.slice(0, -1), ['run', '--standalone', '--format', 'json', '--auto']);
+  assert.match(firstCall.at(-1)!, /\[PERMISSION PROTOCOL\][\s\S]*say ok$/);
   // two steps summed into one event; reasoning tokens count as output
   assert.deepEqual(usages(a.id), [{ input: 10546, output: 139, cacheRead: 10240, cost: 0.0153 }]);
 
@@ -93,7 +118,11 @@ test('pi: json events, session id, --session on steer, instructions as system pr
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, '01a14434-77aa-7136-b481-570dba7b7def');
   assert.deepEqual(texts(events(a.id, 'output')), ['hi from pi']);
   assert.deepEqual(texts(events(a.id, 'tool')), ['bash: ls -la']);
-  assert.deepEqual(fakeCalls('pi')[0], ['-p', '--mode', 'json', 'say hi']);
+  const firstCall = fakeCalls('pi')[0]!;
+  assert.deepEqual(firstCall.slice(0, 3), ['-p', '--mode', 'json']);
+  assert.ok(firstCall.includes('--append-system-prompt'));
+  assert.match(firstCall.at(-2)!, /\[PERMISSION PROTOCOL\]/);
+  assert.equal(firstCall.at(-1), 'say hi');
   // both assistant messages (the tool call and the answer) summed into one event
   assert.deepEqual(usages(a.id), [{ input: 2225, output: 60, cacheRead: 2112, cost: 0.0082 }]);
   await sm.steerAgent(a.id, '@file looks like an attachment');
@@ -127,7 +156,10 @@ test('hermes: final answer as output, session id from stderr, --resume on steer'
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   assert.equal(sm.getAgent(a.id)!.nativeSessionId, '20261016_101543_8b1686');
   assert.deepEqual(texts(events(a.id, 'output')), ['Hello from Hermes.\nSecond line.']);
-  assert.deepEqual(fakeCalls('hermes')[0], ['chat', '-Q', '--query=-starts with a dash', '--source', 'tool', '--yolo']);
+  const firstCall = fakeCalls('hermes')[0]!;
+  assert.deepEqual(firstCall.slice(0, 2), ['chat', '-Q']);
+  assert.match(firstCall[2]!, /--query=\[PERMISSION PROTOCOL\][\s\S]*-starts with a dash$/);
+  assert.deepEqual(firstCall.slice(3), ['--source', 'tool', '--yolo']);
   await sm.steerAgent(a.id, 'more');
   await settled(a.id);
   assert.deepEqual(fakeCalls('hermes')[1], ['chat', '-Q', '--query=more', '--source', 'tool', '--yolo', '--resume', '20261016_101543_8b1686']);
@@ -142,7 +174,10 @@ test('gemini: stream-json deltas joined per message, tools, session id, usage, -
   assert.deepEqual(texts(events(a.id, 'output')), ["I'll look at the files first.", 'Hello from Gemini.']);
   assert.deepEqual(texts(events(a.id, 'tool')), ['run_shell_command: ls -la']);
   assert.deepEqual(usages(a.id), [{ input: 8432, output: 218, cacheRead: 4096 }]);
-  assert.deepEqual(fakeCalls('gemini')[0], ['-p', 'say hi', '--output-format', 'stream-json', '--approval-mode', 'auto_edit']);
+  const firstCall = fakeCalls('gemini')[0]!;
+  assert.equal(firstCall[0], '-p');
+  assert.match(firstCall[1]!, /\[PERMISSION PROTOCOL\][\s\S]*say hi$/);
+  assert.deepEqual(firstCall.slice(2), ['--output-format', 'stream-json', '--approval-mode', 'auto_edit']);
 
   await sm.steerAgent(a.id, '-v looks like a flag');
   await settled(a.id);
@@ -170,7 +205,10 @@ test('aider: plain-text reply as one output, edits and commits as tools, usage, 
   assert.deepEqual(texts(events(a.id, 'tool')), ['edit: hello.py', 'git commit 1a2b3c4: feat: Add hello.py with a greeting']);
   assert.deepEqual(usages(a.id), [{ input: 2300, output: 120, cacheRead: 4500, cacheWrite: 1100, cost: 0.0123 }]);
   const flags = ['--yes-always', '--no-pretty', '--no-stream', '--no-fancy-input', '--no-check-update', '--no-show-model-warnings', '--no-analytics'];
-  assert.deepEqual(fakeCalls('aider')[0], ['--message', 'create hello.py', ...flags]);
+  const firstCall = fakeCalls('aider')[0]!;
+  assert.deepEqual(firstCall.slice(0, 1), ['--message']);
+  assert.match(firstCall[1]!, /\[PERMISSION PROTOCOL\][\s\S]*create hello\.py$/);
+  assert.deepEqual(firstCall.slice(2), flags);
   assert.equal(fakeCwds('aider')[0], `${realpathSync(WORK)} ${WORK}`, 'runs in the agent cwd, where its chat history lives');
 
   await sm.steerAgent(a.id, '--also add a test');
@@ -184,7 +222,9 @@ test('goose: named session, plain-text reply, tool calls, --resume on steer', as
   assert.equal(sm.getAgent(a.id)!.status, 'idle');
   const name = sm.getAgent(a.id)!.nativeSessionId!;
   assert.match(name, new RegExp(`^agentix-${a.id}-[0-9a-z]+$`));
-  assert.deepEqual(fakeCalls('goose')[0], ['run', '--name', name, '--text', 'look around']);
+  const firstCall = fakeCalls('goose')[0]!;
+  assert.deepEqual(firstCall.slice(0, 4), ['run', '--name', name, '--text']);
+  assert.match(firstCall[4]!, /\[PERMISSION PROTOCOL\][\s\S]*look around$/);
   assert.deepEqual(texts(events(a.id, 'output')), ["I'll check the folder.\n\nThe folder has hello.txt."]);
   assert.deepEqual(texts(events(a.id, 'tool')), ['shell: ls -la']);
 

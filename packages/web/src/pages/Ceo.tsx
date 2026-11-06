@@ -77,8 +77,11 @@ export function Ceo() {
   async function send(text: string) {
     const t = text.trim();
     if (!t || !ceo) return;
-    setDraft(''); setError('');
-    try { await api.steer(ceo.id, t); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    setError('');
+    try {
+      await api.steer(ceo.id, t);
+      setDraft(current => current.trim() === t ? '' : current);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
 
   function startTalking() {

@@ -25,9 +25,18 @@ export function Settings() {
   const [emb, setEmb] = useState<ServerSettings['embeddings']>();
   const [embTest, setEmbTest] = useState<string>();
   const [resetBusy, setResetBusy] = useState(false);
+  const [health, setHealth] = useState<{ ok: boolean; store: 'sqlite' | 'json'; errors: string[] }>();
 
   const detect = () => api.adapters().then(setAdapters).catch(e => setError(String(e.message ?? e)));
   useEffect(() => { detect(); }, []);
+  useEffect(() => {
+    let live = true;
+    const check = () => api.health().then(value => { if (live) setHealth(value); })
+      .catch(e => { if (live) setHealth({ ok: false, store: 'sqlite', errors: [String(e.message ?? e)] }); });
+    check();
+    const timer = setInterval(check, 10_000);
+    return () => { live = false; clearInterval(timer); };
+  }, []);
   // Take the saved paths once; later saves of other settings must not wipe what's being typed.
   const pathsLoaded = useRef(false);
   useEffect(() => { if (server && !pathsLoaded.current) { pathsLoaded.current = true; setPaths(server.cliPaths); setEmb(server.embeddings); } }, [server]);
@@ -39,9 +48,10 @@ export function Settings() {
     return () => speechSynthesis.removeEventListener('voiceschanged', load);
   }, []);
 
-  async function save(patch: Partial<ServerSettings>, what: string) {
+  async function save(patch: Partial<ServerSettings>, what: string): Promise<boolean> {
     setError(''); setSaved('');
-    try { setServerSettings(await api.saveSettings(patch)); setSaved(what); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    try { setServerSettings(await api.saveSettings(patch)); setSaved(what); return true; }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); return false; }
   }
   function saveLocal(next: typeof local) { setLocal(next); saveSettings(next); }
 
@@ -92,12 +102,7 @@ export function Settings() {
       </section>
 
       <section className="card">
-        <h2>Workers and history</h2>
-        <label className="check">
-          <input type="checkbox" checked={server.worktrees} onChange={e => save({ worktrees: e.target.checked }, 'worktree setting')} />
-          Give each new worker its own git branch (worktree) when its folder is a git repo
-        </label>
-        <p className="muted small">Workers then never overwrite each other. Review a worker's changes in its panel and Merge or Discard them.</p>
+        <h2>History</h2>
         <div className="grid2">
           <label>Keep the detailed event log for (days)
             <input type="number" min={0} max={3650} defaultValue={server.retentionDays} key={server.retentionDays}
@@ -126,7 +131,7 @@ export function Settings() {
               {embTest && <span className={`small grow ${embTest.startsWith('✓') ? 'st-working' : 'st-error'}`}>{embTest}</span>}
               <button className="btn" disabled={emb.provider === 'off'} onClick={async () => {
                 setEmbTest('Testing…');
-                await save({ embeddings: emb }, 'memory search');
+                if (!await save({ embeddings: emb }, 'memory search')) { setEmbTest('✕ settings were not saved'); return; }
                 const r = await api.testEmbeddings().catch(e => ({ ok: false, error: String(e.message ?? e) }) as { ok: boolean; error?: string; dimensions?: number });
                 setEmbTest(r.ok ? `✓ works (${r.dimensions} dimensions)` : `✕ ${r.error}`);
               }}>Test</button>
@@ -175,6 +180,16 @@ export function Settings() {
           </div>
         </div>
         <p className="muted small">Talking to the CEO needs Chrome or Edge{canListen ? '' : ' (not available in this browser)'}; speech recognition usually needs internet.</p>
+      </section>
+
+      <section className="card">
+        <h2>Storage health</h2>
+        {!health ? <p className="muted small">Checking…</p> : <>
+          <p className={`small ${health.ok ? 'st-working' : 'st-error'}`}>
+            {health.ok ? `✓ ${health.store} writes are healthy` : `Storage needs attention (${health.store})`}
+          </p>
+          {health.errors.map((message, i) => <p className="error small" key={i}>{message}</p>)}
+        </>}
       </section>
 
       <section className="card">

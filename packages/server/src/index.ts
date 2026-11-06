@@ -13,11 +13,14 @@ import { listModels, unavailableModelError } from './adapters/models.ts';
 import { getSettings, updateSettings, SettingsError } from './settings.ts';
 import { getBrief, setBrief, listNotes, addNote, deleteNote, clearSharedContext, searchContextSmart, embed, lastEmbeddingError } from './context.ts';
 import { listTasks, clearTasks } from './tasks.ts';
+import { clearPermissionRequests } from './approvals.ts';
 import { pruneOldEvents } from './retention.ts';
 import { scanClis } from './setup.ts';
 import { historyDir } from './history.ts';
 import { killOrphanRuns } from './procs.ts';
 import { AGENTIX_HOME } from './store.ts';
+import { getApiToken } from './auth.ts';
+import { acquireServerLock } from './server-lock.ts';
 
 export const DEFAULT_PORT = Number(process.env.AGENTIX_PORT) || 4317;
 export const HOST = '127.0.0.1';
@@ -26,16 +29,18 @@ const SSE_DEFAULT_REPLAY = 100;
 const sseMaxReplay = () => Math.max(1, Number(process.env.AGENTIX_SSE_MAX_REPLAY) || 2_000);
 
 /**
- * When AGENTIX_TOKEN is set, the API needs it: in the x-agentix-token header, or as ?token=
- * for the event stream (a browser's EventSource cannot send headers). Without it the server
- * answers every API request with 401.
+ * The API uses a per-install token by default. AGENTIX_TOKEN can override it, and tests or
+ * intentionally open local setups can set AGENTIX_AUTH=off.
  */
-const API_TOKEN = process.env.AGENTIX_TOKEN || '';
+const API_TOKEN = getApiToken();
 
 function tokenOk(req: IncomingMessage, url: URL): boolean {
   if (!API_TOKEN) return true;
   const header = req.headers['x-agentix-token'];
-  const given = (Array.isArray(header) ? header[0] : header) || url.searchParams.get('token') || '';
+  // Query tokens are needed for EventSource, which cannot set headers. Do not accept them on
+  // ordinary API routes where URLs are more likely to appear in logs or copied links.
+  const isStream = url.pathname === '/api/stream' || /^\/api\/agents\/[^/]+\/stream$/.test(url.pathname);
+  const given = (Array.isArray(header) ? header[0] : header) || (isStream ? url.searchParams.get('token') : '') || '';
   return given === API_TOKEN;
 }
 
@@ -48,13 +53,23 @@ async function requireAvailableModel(kind: string, value: unknown): Promise<stri
 }
 
 async function readJson(req: IncomingMessage): Promise<any> {
-  let body = '';
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let tooLarge = false;
   for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 1_000_000) throw new HttpError(413, 'Body too large');
+    if (tooLarge) continue; // drain the request so the connection can be reused cleanly
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 1_000_000) { tooLarge = true; chunks.length = 0; continue; }
+    chunks.push(buffer);
   }
+  if (tooLarge) throw new HttpError(413, 'Body too large');
+  const body = Buffer.concat(chunks).toString('utf8');
   if (!body.trim()) return {};
-  try { return JSON.parse(body); } catch { throw new HttpError(400, 'Invalid JSON body'); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { throw new HttpError(400, 'Invalid JSON body'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new HttpError(400, 'JSON body must be an object');
+  return parsed;
 }
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -123,11 +138,12 @@ function isWithin(root: string, target: string): boolean {
 }
 
 /** The built dashboard. Unknown paths get index.html so client-side routes (/agents, ...) work on reload. */
-function serveStatic(pathname: string, res: ServerResponse) {
+function serveStatic(pathname: string, res: ServerResponse, headOnly = false) {
   const index = join(WEB_DIST, 'index.html');
   if (!existsSync(index)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Agentix server is running, but the dashboard is not built. Run: npm install && npm run build\n');
+    const message = 'Agentix server is running, but the dashboard is not built. Run: npm install && npm run build\n';
+    res.end(headOnly ? undefined : message);
     return;
   }
   let file = resolve(WEB_DIST, `.${decodePathPart(pathname)}`);
@@ -147,11 +163,11 @@ function serveStatic(pathname: string, res: ServerResponse) {
     // hashed assets never change; index.html must always be fresh
     'Cache-Control': file.includes(`${sep}assets${sep}`) ? 'public, max-age=31536000, immutable' : 'no-cache',
   });
-  res.end(readFileSync(file));
+  res.end(headOnly ? undefined : readFileSync(file));
 }
 
-function writeSSE(res: ServerResponse, e: AgentEvent) {
-  res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+function writeSSE(res: ServerResponse, e: AgentEvent): boolean {
+  return res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
 }
 
 /**
@@ -167,6 +183,28 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
   });
   res.write(': connected\n\n');
 
+  let closed = false;
+  let unsubscribe = () => {};
+  const keepalive = setInterval(() => {
+    if (closed || res.write(': keepalive\n\n')) return;
+    closed = true;
+    unsubscribe();
+    clearInterval(keepalive);
+    res.destroy();
+  }, 15000);
+  const closeStream = () => {
+    if (closed) return;
+    closed = true;
+    unsubscribe();
+    clearInterval(keepalive);
+    if (!res.destroyed) res.destroy();
+  };
+  const send = (event: AgentEvent) => {
+    if (!closed && !writeSSE(res, event)) closeStream();
+  };
+  // Subscribe before replaying so no event can slip between the snapshot and live stream.
+  unsubscribe = bus.subscribe(e => { if (!agentId || e.agentId === agentId) send(e); });
+
   const resume = req.headers['last-event-id'] ?? url.searchParams.get('after');
   const after = resume != null ? Number(resume) || 0 : 0;
   const asked = Number(url.searchParams.get('tail') ?? SSE_DEFAULT_REPLAY);
@@ -176,14 +214,13 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
     ? max
     : Math.min(Math.max(Number.isFinite(asked) ? asked : SSE_DEFAULT_REPLAY, 0), max);
   const history = agentId ? store.getAgentEvents(agentId, after, limit) : store.getEvents(after, limit);
-  for (const e of history) writeSSE(res, e);
+  for (const e of history) {
+    if (closed) break;
+    send(e);
+  }
 
-  // No await between replay and subscribe, so no event can slip through the gap.
-  const unsubscribe = bus.subscribe(e => {
-    if (!agentId || e.agentId === agentId) writeSSE(res, e);
-  });
-  const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15000);
-  req.on('close', () => { unsubscribe(); clearInterval(keepalive); });
+  res.on('close', closeStream);
+  req.on('aborted', closeStream);
 }
 
 export function createAgentixServer(): { server: Server; sessionManager: SessionManager; bus: EventBus } {
@@ -206,10 +243,10 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
       const parts = url.pathname.split('/').filter(Boolean).map(decodePathPart); // ['api','agents',id,action]
       if (parts[0] !== 'api') {
         if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
-        return serveStatic(url.pathname, res);
+        return serveStatic(url.pathname, res, method === 'HEAD');
       }
 
-      const [, resource, id, action, sub] = parts;
+      const [, resource, id, action, _sub] = parts;
 
       if (resource === 'adapters' && id && action === 'models' && method === 'GET') {
         if (!getAdapter(id)) throw new HttpError(404, `Unknown agent kind: ${id}`);
@@ -231,9 +268,15 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           agentId: p.get('agent') || undefined,
           types: p.get('type')?.split(',').filter(Boolean),
           before: Number(p.get('before')) || undefined,
+          after: Number(p.get('after')) || undefined,
           limit,
         });
         return sendJson(res, 200, { events, stats: store.eventStats() });
+      }
+
+      if (resource === 'health' && !id && method === 'GET') {
+        const errors = store.storageErrors();
+        return sendJson(res, 200, { ok: errors.length === 0, store: store.getStoreType(), errors });
       }
 
       if (resource === 'settings' && !id) {
@@ -247,6 +290,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
       if (resource === 'reset' && !id && method === 'POST') {
         await sm.resetWorkspace();
         clearTasks();
+        clearPermissionRequests();
         clearSharedContext();
         const settings = updateSettings({ setupDone: false, contextPaths: [] });
         return sendJson(res, 200, { ok: true, settings });
@@ -296,6 +340,15 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (id && !action && method === 'DELETE') { sm.removeTask(id); return sendJson(res, 200, { ok: true }); }
       }
 
+      if (resource === 'approvals') {
+        if (!id && method === 'GET') return sendJson(res, 200, { approvals: sm.getPermissionRequests() });
+        if (id && !action && method === 'PATCH') {
+          const b = await readJson(req);
+          if (b.decision !== 'approved' && b.decision !== 'declined') throw new HttpError(400, 'decision must be approved or declined');
+          return sendJson(res, 200, { approval: sm.decidePermission(id, b.decision, 'user', b.note ?? '') });
+        }
+      }
+
       if (resource === 'coordinator' && id === 'ask' && method === 'POST') {
         const b = await readJson(req);
         return sendJson(res, 200, { event: sm.askCoordinator(b.text, b.about) });
@@ -314,7 +367,6 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
           const model = await requireAvailableModel(b.kind, b.model);
           const agent = await sm.createAgent(b.kind, {
             name: b.name, role: b.role, avatarId: b.avatarId, cwd: b.cwd, prompt: b.prompt, replace: b.replace, model,
-            ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
           });
           return sendJson(res, 201, { agent });
         }
@@ -339,6 +391,7 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
       }
 
       if (resource === 'agents' && id && action) {
+        if (action === 'chats' && method === 'GET') return sendJson(res, 200, { chats: sm.getChats(id) });
         if (action === 'steer' && method === 'POST') {
           const b = await readJson(req);
           return sendJson(res, 200, { event: await sm.steerAgent(id, b.text, b.from) });
@@ -346,11 +399,6 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
         if (action === 'interrupt' && method === 'POST') {
           await sm.interruptAgent(id);
           return sendJson(res, 200, { ok: true });
-        }
-        if (action === 'worktree') {
-          if (!sub && method === 'GET') return sendJson(res, 200, await sm.getWorktree(id));
-          if (sub === 'merge' && method === 'POST') return sendJson(res, 200, await sm.mergeWorktree(id));
-          if (sub === 'discard' && method === 'POST') { await sm.discardWorktree(id); return sendJson(res, 200, { ok: true }); }
         }
         if (action === 'session' && method === 'POST') {
           const b = await readJson(req);
@@ -376,23 +424,52 @@ export function createAgentixServer(): { server: Server; sessionManager: Session
 }
 
 /** Start listening; resolves once bound, rejects with a readable error (e.g. port in use). */
-export function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sessionManager: SessionManager; port: number }> {
-  const { server, sessionManager } = createAgentixServer();
+export async function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sessionManager: SessionManager; port: number }> {
+  const releaseLock = acquireServerLock();
+  return startServerWithLock(port, releaseLock);
+}
+
+/** Entry used by the CLI bootstrap after it has acquired the data-folder lock before importing this module. */
+export async function startServerWithLock(port: number, releaseLock: () => void): Promise<{ server: Server; sessionManager: SessionManager; port: number }> {
+  let created: ReturnType<typeof createAgentixServer>;
+  try { created = createAgentixServer(); }
+  catch (error) { releaseLock(); throw error; }
+  const { server, sessionManager } = created;
   return new Promise((resolve, reject) => {
-    server.once('error', (err: any) => {
+    let settled = false;
+    const release = () => { if (!settled) { settled = true; releaseLock(); } };
+    const onListenError = (err: any) => {
+      release();
       reject(err.code === 'EADDRINUSE'
         ? new Error(`port ${port} is already in use (another agentix server?). Set AGENTIX_PORT to use a different one.`)
         : err);
-    });
+    };
+    server.once('error', onListenError);
+    server.once('close', release);
     server.listen(port, HOST, async () => {
+      server.off('error', onListenError);
+      try {
       // Agents that were mid-turn when the server last stopped can't still be running.
       // (Only after binding, so a second server that fails to start can't touch the live one's agents.)
       store.resetBusyAgents();
+      // Tasks that were being worked on when the server stopped go back on the board.
+      try { sessionManager.resumeInterruptedTasks(); } catch { /* the board is a convenience, not the store of record */ }
       // The CLIs of a server that died are still running: stop them before starting new work.
       try {
         const stopped = await killOrphanRuns();
         if (stopped) console.log(`agentix: stopped ${stopped} agent CLI(s) left behind by a previous server`);
       } catch { /* best effort */ }
+      // Work a previous server was running, had queued or was holding is offered again: a restart must
+      // cost seconds, not the instruction an agent was following. Only after its CLIs are stopped, so
+      // the same turn is never run twice.
+      try {
+        const resumed = sessionManager.resumePendingTurns();
+        if (resumed) console.log(`agentix: offered ${resumed} turn(s) left unfinished by a previous server`);
+      } catch { /* a torn journal must not stop the server */ }
+      try {
+        const approvals = sessionManager.recoverApprovedPermissions();
+        if (approvals) console.log(`agentix: resumed ${approvals} approved permission request(s)`);
+      } catch { /* recovery of an approval must not stop the server */ }
       // Old events leave the database now and every 6 hours (the history files keep them).
       pruneOldEvents();
       const prune = setInterval(pruneOldEvents, 6 * 3600_000);
@@ -400,6 +477,13 @@ export function startServer(port = DEFAULT_PORT): Promise<{ server: Server; sess
       server.once('close', () => clearInterval(prune));
       const addr = server.address();
       resolve({ server, sessionManager, port: typeof addr === 'object' && addr ? addr.port : port });
+      } catch (error) {
+        await sessionManager.shutdown().catch(() => {});
+        server.closeAllConnections?.();
+        server.close();
+        release();
+        reject(error);
+      }
     });
   });
 }

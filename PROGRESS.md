@@ -273,3 +273,106 @@ itself, and cleans up after itself.
 - `packages/server/roles/AGENTS.md` says how each role should work: "Everyone", then CEO, Coordinator and Worker.
   Every agent gets "Everyone" plus its own section with its first prompt of each session (workers too, not only
   the CEO and coordinator). Copy it to `~/.agentix/AGENTS.md` to edit it; that copy wins. An empty copy turns it off.
+
+## A harness that never loses work (2026-10-23)
+
+Round three of "the office behaves like a harness, not a demo". Everything here is about work that was
+being dropped, stranded or hidden.
+
+- **A turn at the office limit waits instead of being dropped.** `AGENTIX_MAX_CONCURRENT_TURNS` used to
+  refuse a turn with an error and throw the prompt away: the task stayed on the board forever and nobody
+  knew to send it again. Turns now go into a FIFO queue (at most 100) and start on their own as soon as a
+  slot frees; the agent shows `queued (N waiting for a turn slot)` and the log says which instruction
+  waits. A queued prompt for an agent that got another turn meanwhile becomes that agent's inbox instead.
+- **A timeout says what it dropped.** A turn stopped by `AGENTIX_TURN_TIMEOUT_MS` used to leave the
+  instructions queued behind it in an inbox nobody would drain, and never told the coordinator. It now
+  reports them (`N instruction(s) were not run (the turn timed out): …`) and frees the slot for the queue.
+- **Shutdown starts nothing.** `shutdown()` marks the office as stopping, so a turn ending during it cannot
+  start the next queued or inbox turn; `resetWorkspace()` clears the flag for the fresh workspace.
+- **A restart fixes the board.** Tasks that were `doing` when the server stopped go back to `todo` with a
+  task event ("the server restarted while it was being worked on"), so a crashed or killed server no longer
+  leaves work hidden in the doing column. And the instruction itself is not lost either: the running turn,
+  the queue and waiting messages are kept in `pending.json` and offered again at the next start (see below).
+- **A CLI that ignores signals is killed.** Interrupts escalate SIGINT → SIGTERM → SIGKILL (one
+  `AGENTIX_KILL_GRACE_MS` between each) and the interrupt waits for all three. A CLI that trapped SIGINT
+  and SIGTERM used to keep running after the server had given up on it, still holding its worktree.
+- **One event is bounded.** Text is kept up to 100k characters and `data` up to 64k (then replaced by
+  `{ truncated: true, bytes }`), so a CLI printing a whole file cannot fill the database, the history file
+  or the event stream; the readable text still reaches the dashboard.
+- **The coordinator can tell a worker something.** `@@tell <agent>` used to be an error unless the target
+  was the CEO ("use @@steer <worker> :: ... to direct workers"), so a note to a busy worker became a red
+  error event and an extra result turn. `@@tell` now reaches any agent and never interrupts it: a working
+  agent reads the message at its next turn (from its inbox), an idle one starts a turn with it, and the
+  message begins `[FROM COORDINATOR <name>]` so the worker knows it did not come from kenz. Bad targets
+  (an unknown name, the agent itself) are still errors.
+- **History flushes are serialized.** A background flush and an awaited one could overlap, so
+  `flushHistory()` could return before a write that another flush had already started had landed, and the
+  lines could reach the file out of order. Writes now go through one promise chain, so awaiting it means
+  the file has everything buffered before the call (the full suite showed this as a flaky history read).
+- **A restart no longer throws away the work in flight.** The running turn, the queue behind the office
+  limit and every waiting inbox message used to live only in `SessionManager`'s maps: stopping the server
+  (or killing it) lost the instruction an agent was following while the task board only said "todo" again,
+  and dropped turns that were waiting in the queue. They are now written to `$AGENTIX_HOME/pending.json`
+  on every turn start/end and queue/inbox change, and the next server offers them again after it has
+  stopped the previous server's CLIs. An interrupted turn is re-issued with a `[AGENTIX] The server
+  restarted in the middle of your last turn …` preamble (check the work, then finish it) instead of being
+  silently repeated, queued turns keep their own prompt, and saved work for an agent that was removed
+  meanwhile is dropped with a log line. What came of the `@@` commands an agent wrote is saved too, so a
+  coordinator still sees its `[COMMAND RESULTS]` after the restart instead of spawning the same worker
+  twice. `resetWorkspace()` deletes the journal.
+- New tests: `robustness.test.ts` (queue, timeout report, task recovery, SIGKILL, event caps, shutdown),
+  `pending.test.ts` (journal while running, restart restores turn + queue + inbox, no duplication after a
+  normal turn, stale work dropped, no stacked restart note, command results delivered once) and one in
+  `coordinator.test.ts` (a message to a working worker: no error, no interruption, delivered on its next
+  turn). 113 server tests.
+
+## Audit follow-up: process safety and recovery (2026-11-06)
+
+- A timed-out or stubborn CLI stays registered as active until its process group exits. This keeps its
+  working folder reserved and prevents a second worker from editing beside it. Shutdown waits for the
+  adapters to confirm exit before releasing the server lock. Process records use atomic replacement.
+- Valid JSON with the wrong top-level shape is quarantined for tasks, approvals, pending work, and
+  settings. A damaged primary JSON store now stops startup with a recovery message and keeps the source
+  file intact instead of silently opening an empty office.
+- History searches now use the authenticated API helper, show a retry action on errors, and ignore stale
+  responses when filters change. Blocked assigned tasks have a one-click Retry action; task deletion asks
+  before removing it. `agentix doctor` reports the platform's process-cleanup capability.
+- Remaining boundary: permission requests are a coordinator workflow, not a universal pre-execution tool
+  gate. Some agent CLIs auto-approve tools, and true enforcement needs adapter-specific approval plumbing
+  or an OS-level sandbox. Verified process-tree cleanup currently works on Linux; macOS restart cleanup
+  cannot verify old process identities, and Windows cleanup targets the direct CLI only.
+- Verification: 137 server tests pass; typecheck, lint, production build, `npm audit`, and live dashboard,
+  authenticated API, CLI, and doctor smoke checks pass under Node 22.
+
+## Audit follow-up: scheduler and dashboard edge cases (2026-11-06)
+
+- Removing an agent now removes its waiting turns first, waits for the active CLI to exit, and keeps its
+  workspace occupied until then. Steering takes priority over queued tasks, concurrent steers use the
+  latest instruction, and permission decisions for agents being removed are rejected without being marked
+  applied. Regression tests cover removal, task retries, steering priority, and simultaneous steers.
+- SSE streams disconnect when the response applies backpressure, rather than buffering an unlimited live
+  feed. JSON request parsing now preserves UTF-8 when a multibyte character crosses network chunks.
+- The JSON fallback validates stored agent/event records, writes snapshots and event rewrites atomically,
+  logs write failures, and exposes persistence errors through authenticated `GET /api/health`. Settings
+  shows storage health; embedding tests stop if saving the edited settings failed.
+- Context search ignores stale responses and agent-output hits link to History. The task owner picker now
+  lists only workers, matching which roles can execute assigned tasks.
+- Verification: 141 server tests pass; typecheck, lint, production build, and `npm audit` pass.
+
+## Audit follow-up: queued work, API contracts and dashboard polish (2026-11-06)
+
+- A replacement steer or permission approval that arrives while a stubborn CLI is exiting is now
+  delivered after that process ends, even when the old turn was aborted. Starting a new session
+  returns `409` while the old CLI is still alive instead of clearing its session underneath it;
+  interrupted tasks return to `todo` once the process exits.
+- An empty saved API token now fails closed with a recovery message instead of silently disabling
+  authentication. Agent and task endpoints validate input types, and only workers can own tasks.
+  Static `HEAD` requests return headers without a response body.
+- History search and event filters are saved in the URL, so views can be bookmarked and shared.
+  Empty type filters now show no events. Coordinator mode saves, message drafts and context-folder
+  saves report failures without discarding the user's input; navigation fits small screens.
+- On Linux, a process group containing only zombies now counts as finished. Zombie entries cannot
+  run or be killed again, and previously caused the orphan-cleanup test to intermittently time out.
+- Verification: 144 server tests pass; typecheck, lint, production build, `npm audit`, and
+  `git diff --check` pass. The shell defaults to Node 18, below the declared Node 20.19+/22.12+
+  minimum; verification used Node 22.23.4 from the local npm cache.

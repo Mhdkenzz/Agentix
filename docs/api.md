@@ -10,13 +10,14 @@ All routes are relative to `http://127.0.0.1:4317` (`AGENTIX_PORT` changes the p
 
 ## Authentication
 
-By default the API is open to this machine only (see above). Set `AGENTIX_TOKEN` to lock it: every
-`/api` request then needs that token, in the `x-agentix-token` header or as `?token=` in the query
+By default the API requires a random token saved in `$AGENTIX_HOME/api-token` (normally
+`~/.agentix/api-token`, created with owner-only permissions). Set `AGENTIX_TOKEN` to override it:
+every `/api` request then needs that token, in the `x-agentix-token` header or as `?token=` in the query
 (a browser's `EventSource` cannot send headers, so the event stream takes the query form). Without it
 the server answers `401 { "error": "Token required" }`. The dashboard takes the token from the address
-bar once (`/?token=…`), keeps it in the browser and drops it from the URL; the CLI sends
-`AGENTIX_TOKEN` from the environment. The dashboard itself (the static files) stays reachable
-without a token.
+bar once (`/?token=…`), keeps it in the browser and drops it from the URL; the CLI reads the saved token
+or uses `AGENTIX_TOKEN` from the environment. The dashboard itself (the static files) stays reachable
+without a token. Set `AGENTIX_AUTH=off` only for local tests or deliberately unauthenticated development.
 
 ## Limits
 
@@ -25,10 +26,11 @@ The server keeps itself from being taken over by a runaway agent:
 | Variable | Default | Meaning |
 |---|---|---|
 | `AGENTIX_MAX_AGENTS` | 64 | agents in the office at once; `POST /api/agents` answers `429` above it |
-| `AGENTIX_MAX_CONCURRENT_TURNS` | 12 | turns running at the same time; a turn above it is refused with an `error` event |
+| `AGENTIX_MAX_CONCURRENT_TURNS` | 12 | turns running at the same time; a turn above it waits in a queue (max 100) and starts when a slot frees |
+| `AGENTIX_MAX_TURN_OUTPUT_BYTES` | 20 MiB | combined CLI stdout/stderr per turn before the CLI is stopped (maximum configurable value: 256 MiB) |
 | `AGENTIX_TURN_TIMEOUT_MS` | 1800000 (30 min) | a turn that runs longer is stopped; the agent goes to `error` and its task to `blocked` |
 | `AGENTIX_SSE_MAX_REPLAY` | 2000 | how many events one stream replay may contain |
-| `AGENTIX_KILL_GRACE_MS` | 3000 | how long an interrupted CLI may take to exit before it is killed |
+| `AGENTIX_KILL_GRACE_MS` | 3000 | how long an interrupted CLI may take to exit after SIGINT, and again after SIGTERM, before SIGKILL |
 
 ### GET `/api/adapters/:kind/models[?refresh=1]`
 
@@ -102,7 +104,6 @@ Create a new agent.
   "cwd": "/path/to/project",
   "prompt": "fix the failing test",
   "replace": false,
-  "worktree": true,
   "model": "gpt-6.1-sol:high"
 }
 ```
@@ -111,8 +112,7 @@ Only `kind` is required. `role` defaults to `worker`, `avatarId` to `"random"` (
 `~/.agentix/workspace` (must be absolute; created if missing). With `prompt`, the first turn starts at once.
 `model` is passed to the CLI's model flag on every turn (empty = the CLI's own default); for Codex,
 `<model>:<level>` also sets the reasoning level. `PATCH /api/agents/:id` takes `model` too (`null` or `""` clears
-it), used from the agent's next turn. A worker whose `cwd` is inside a git repository gets its own worktree and branch (see Worktrees) unless
-`"worktree": false` or the `worktrees` setting is off.
+it), used from the agent's next turn. Agents work directly in the configured `cwd`.
 
 **Response:** `201` with the created agent. `400` for an unknown kind/role/avatar, `409` if a
 coordinator or CEO already exists (body has `data.existing`); send `"replace": true` to demote it to worker.
@@ -139,6 +139,12 @@ The tasks it owned go back to the board as `todo` without an owner.
 `{ "clear": false }`: interrupt the agent and drop its native session, so the next message starts a new
 conversation (the coordinator and CEO get their role instructions again). Emits a `session` event; with
 `clear: true` dashboards hide the events before it (they stay in the history). CLI: `agentix new <id> [--clear]`.
+
+### GET `/api/agents/:id/chats`
+
+Returns `{ chats }`, one saved chat per agent creation or `New session` boundary. Each item has a
+stable event-based `id`, a title, start time, event count and event bounds. `/api/events` accepts
+`agent`, `after` and `before` together to page or search within those bounds.
 
 ### POST `/api/agents/:id/steer`
 
@@ -172,19 +178,6 @@ Before every worker and coordinator turn (when `sharedContext` is on), the promp
 `[SHARED CONTEXT]` block: the brief, the 5 best hits for the task (never the agent's own output) and how to
 add a note. Any agent can save a note with a line `@@remember :: <fact>`.
 
-### Worktrees
-
-Each such worker works in `$AGENTIX_HOME/worktrees/<agentId>` on branch `agentix/<name>-<id>`, started from
-the repo's current commit, so workers in one repo never overwrite each other.
-
-- `GET /api/agents/:id/worktree`: `{ branch, repo, path, target, files: [{ status, path }], commits, stat, diff, truncated }`,
-  everything changed since the branch's base (new files included; diff capped at 200 KB). `404` without a worktree.
-- `POST /api/agents/:id/worktree/merge`: commits the work on the branch and merges it (`--no-ff`) into the
-  branch the repo has checked out. `{ merged, into }`. A failed merge is aborted and nothing changes (`409`).
-  `409` while the agent is running. The coordinator is told.
-- `POST /api/agents/:id/worktree/discard`: resets the worktree to its base and deletes new files.
-- Removing the agent commits leftover work to its branch (kept if it has new commits) and deletes the folder.
-
 ### Tasks
 
 The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title, status, owner?, by, note?, createdAt, updatedAt }`,
@@ -195,9 +188,26 @@ The task board, stored in `$AGENTIX_HOME/tasks.json`. A task: `{ id: "t1", title
 - `PATCH /api/tasks/:id` `{ title?, status?, owner? (null clears), note? }`: `{ task }`
 - `DELETE /api/tasks/:id`
 
-The server moves a worker's own tasks: `todo`/`review`/`blocked` to `doing` when a turn starts, `doing` to
-`review` when it ends (`blocked` if it failed). `@@spawn ... :: <task>` adds the task for the new worker.
-The coordinator's `[TEAM STATUS]`/updates list open tasks.
+Only the task assigned to a turn moves: `todo` or `review` to `doing`, then to `review` when it ends
+(`blocked` if it failed). A blocked task must be explicitly reopened to `todo`. `@@spawn ... :: <task>`
+adds the task for the new worker. The coordinator's `[TEAM STATUS]`/updates list open tasks.
+
+### Permission approvals
+
+Requests are saved in `$AGENTIX_HOME/approvals.json`, including decisions, across server restarts.
+Workers use `@@tell coordinator :: PERMISSION REQUEST: <action, reason and impact>`. Agentix blocks the
+active task, stops the current turn, assigns a stable request ID (`p1`, `p2`, ...), and sends it to the
+coordinator. If no agent coordinator is available, the request stays visible for human review on the
+Tasks page.
+
+- `GET /api/approvals`: `{ approvals }`, pending requests first
+- `PATCH /api/approvals/:id` `{ "decision": "approved", "note": "exact approved scope" }`: records a
+  decision and resumes the worker within that scope
+- The same PATCH with `"decision": "declined"` keeps its task blocked and records the reason
+- Coordinator commands: `@@approve p1 :: <approved action and limit>` or `@@decline p1 :: <reason>`
+
+Permission requests are detected from the agent's output. This workflow records and routes decisions;
+the agent CLI may have performed a tool action before its output contains the request.
 
 ### GET `/api/usage`
 
@@ -220,13 +230,14 @@ The dashboard's `/setup` page uses it on first launch (`setupDone` false and no 
 ### GET `/api/events`
 
 Search the whole history, newest first. Query: `q` (case-insensitive text match), `agent` (id),
-`type` (comma-separated), `before` (event id, for the next page), `limit` (default 200, max 1000).
+`type` (comma-separated), `after` (exclusive lower event id), `before` (exclusive upper event id),
+`limit` (default 200, max 1000).
 Response: `{ events, stats }`, where `stats` is `[{ agentId, count, lastTs }]` for every agent.
 
 ### GET / PUT `/api/settings`
 
 `{ "coordinatorMode": "both", "cliPaths": { "codex": "/opt/bin/codex" }, "defaultKind": "codex", "defaultCwd": "",
-"sharedContext": true, "contextPaths": ["/abs/docs"], "setupDone": false, "worktrees": true, "retentionDays": 30,
+"sharedContext": true, "contextPaths": ["/abs/docs"], "setupDone": false, "retentionDays": 30,
 "embeddings": { "provider": "off", "url": "http://127.0.0.1:11434", "model": "nomic-embed-text" } }`.
 PUT takes any subset. `coordinatorMode`: `human` (no coordinator updates, its @@ commands are ignored),
 `agent` (the dashboard routes kenz's worker instructions through the coordinator), `both` (default).
@@ -245,14 +256,16 @@ Lines in a coordinator's output (the server runs them; see `server/src/commands.
 @@spawn kind=codex name=Rook avatar=random cwd=/abs/path model=gpt-6-sol :: <task>
 @@steer <agent id or name> :: <instructions>
 @@stop <agent id or name>
+@@tell <agent id or name> :: <message>   # a message, not an instruction: waits while the agent works
 @@tell ceo :: <report>
 @@remember :: <fact for the shared context>
 @@task owner=Rook :: <title>                 # add a task to the board
 @@task t3 status=done note="merged" :: <new title (optional)>   # change one
 ```
 
-The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). Workers may write `@@remember`
-and `@@task <id> status=... note=...` for their own tasks. `@@spawn ... worktree=no` skips the worktree. Every CEO turn starts with a `[TEAM STATUS]` digest.
+The CEO may only write `@@tell coordinator :: <message>` (and `@@remember`). A coordinator's `@@tell` reaches
+any agent and never interrupts it: a working agent reads the message at its next turn, an idle one starts a
+turn with it. Workers may write `@@remember` and `@@task <id> status=... note=...` for their own tasks. Every CEO turn starts with a `[TEAM STATUS]` digest.
 After a CEO request, Agentix waits for a coordinator reply, sends up to two non-interrupting follow-ups,
 and reports an issue after three unanswered requests. The timeout is 30 seconds by default and can be adjusted
 with `AGENTIX_CEO_REPLY_TIMEOUT_MS`. A coordinator response clears the watchdog.
@@ -310,11 +323,17 @@ without it (`AGENTIX_STORE=json` forces it). Both behave the same — the same c
 against both. Event search uses an FTS5 index (trigram tokenizer), so a text search does not scan the
 whole table; an SQLite build without FTS5 falls back to `LIKE`.
 
+`GET /api/health` reports `{ ok, store, errors }`. For the JSON fallback, disk write failures are
+logged and exposed here; the Settings page polls this endpoint and displays outstanding errors.
+
 ## Leftover processes
 
 Every agent CLI the server starts is remembered in `$AGENTIX_HOME/runs/`. When the server starts, the
 CLIs a previous server left behind (a crash, a closed laptop) are stopped, so they cannot keep burning
-tokens with nobody watching. A pid is only killed when it still runs the binary Agentix started.
+tokens with nobody watching. On Linux, a pid is only killed when its executable, start time, and
+process group still match the recorded process. On macOS, live process-group stops work but restart
+cleanup cannot verify old process identity. On Windows, cleanup currently targets the direct CLI only.
+`agentix doctor` reports the platform capability.
 
 ## Dashboard
 

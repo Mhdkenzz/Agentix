@@ -1,7 +1,8 @@
 // Agentix — server settings, kept in $AGENTIX_HOME/settings.json.
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { AGENTIX_HOME } from './store.ts';
+import { readJsonFile, quarantineJsonFile } from './json-files.ts';
 
 export type CoordinatorMode = 'human' | 'agent' | 'both';
 
@@ -22,8 +23,6 @@ export interface Settings {
   contextPaths: string[];
   /** the first-run setup has been finished (or skipped) */
   setupDone: boolean;
-  /** workers started inside a git repo get their own worktree and branch */
-  worktrees: boolean;
   /** events older than this many days leave the database (0 = keep forever); history files keep everything */
   retentionDays: number;
   /** optional semantic search for the shared context, through a local Ollama */
@@ -40,7 +39,7 @@ const MODES: CoordinatorMode[] = ['human', 'agent', 'both'];
 const DEFAULTS: Settings = {
   coordinatorMode: 'both', cliPaths: {}, defaultKind: 'codex', defaultCwd: '',
   sharedContext: true, contextPaths: [], setupDone: false,
-  worktrees: true, retentionDays: 30,
+  retentionDays: 30,
   embeddings: { provider: 'off', url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' },
 };
 const file = () => join(AGENTIX_HOME, 'settings.json');
@@ -49,10 +48,36 @@ let cache: Settings | undefined;
 
 export function getSettings(): Settings {
   if (cache) return cache;
-  try {
-    const saved = JSON.parse(readFileSync(file(), 'utf8'));
-    cache = { ...DEFAULTS, ...saved, embeddings: { ...DEFAULTS.embeddings, ...saved.embeddings } };
-  } catch { cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [], embeddings: { ...DEFAULTS.embeddings } }; }
+  const saved = readJsonFile(file(), 'settings');
+  if (saved !== undefined) {
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) {
+      quarantineJsonFile(file(), 'settings file has an invalid structure');
+      cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [], embeddings: { ...DEFAULTS.embeddings } };
+    } else {
+      delete saved.worktrees; // ignored setting left by versions that managed per-agent worktrees
+      const valid = (saved.coordinatorMode === undefined || MODES.includes(saved.coordinatorMode))
+      && (saved.cliPaths === undefined || (saved.cliPaths && typeof saved.cliPaths === 'object' && !Array.isArray(saved.cliPaths)
+        && Object.values(saved.cliPaths).every(path => typeof path === 'string')))
+      && (saved.defaultKind === undefined || typeof saved.defaultKind === 'string')
+      && (saved.defaultCwd === undefined || typeof saved.defaultCwd === 'string')
+      && (saved.sharedContext === undefined || typeof saved.sharedContext === 'boolean')
+      && (saved.contextPaths === undefined || (Array.isArray(saved.contextPaths) && saved.contextPaths.every((path: unknown) => typeof path === 'string')))
+      && (saved.setupDone === undefined || typeof saved.setupDone === 'boolean')
+      && (saved.retentionDays === undefined || (Number.isInteger(saved.retentionDays) && saved.retentionDays >= 0))
+      && (saved.embeddings === undefined || (saved.embeddings && typeof saved.embeddings === 'object' && !Array.isArray(saved.embeddings)
+        && (saved.embeddings.provider === undefined || saved.embeddings.provider === 'off' || saved.embeddings.provider === 'ollama')
+        && (saved.embeddings.url === undefined || typeof saved.embeddings.url === 'string')
+        && (saved.embeddings.model === undefined || typeof saved.embeddings.model === 'string')));
+      if (!valid) {
+        quarantineJsonFile(file(), 'settings file has an invalid structure');
+        cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [], embeddings: { ...DEFAULTS.embeddings } };
+      } else {
+        cache = { ...DEFAULTS, ...saved, embeddings: { ...DEFAULTS.embeddings, ...saved.embeddings } };
+      }
+    }
+  } else {
+    cache = { ...DEFAULTS, cliPaths: {}, contextPaths: [], embeddings: { ...DEFAULTS.embeddings } };
+  }
   return cache!;
 }
 
@@ -72,7 +97,6 @@ export function updateSettings(patch: Partial<Settings>): Settings {
   if (typeof patch.defaultCwd === 'string') next.defaultCwd = patch.defaultCwd.trim();
   if (patch.sharedContext !== undefined) next.sharedContext = Boolean(patch.sharedContext);
   if (patch.setupDone !== undefined) next.setupDone = Boolean(patch.setupDone);
-  if (patch.worktrees !== undefined) next.worktrees = Boolean(patch.worktrees);
   if (patch.retentionDays !== undefined) {
     const n = Number(patch.retentionDays);
     if (!Number.isInteger(n) || n < 0) throw new SettingsError('retentionDays must be a whole number of days (0 = keep forever)');

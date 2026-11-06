@@ -1,11 +1,8 @@
-// Worktree per worker, task board, usage totals, event retention and embedding search.
+// Task board, usage totals, event retention and embedding search.
 import { TMP, waitFor } from './helpers.ts';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { startServer } from '../src/index.ts';
 import { store } from '../src/store.ts';
 import { updateSettings } from '../src/settings.ts';
@@ -22,67 +19,17 @@ const json = async (path: string, method = 'GET', body?: any) => {
   return { status: r.status, body: await r.json() as any };
 };
 const idle = (id: string) => waitFor(() => !sm.isRunning(id) && sm.getAgent(id)?.status === 'idle', 5000, `${id} idle`);
-const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' }).trim();
-
-const REPO = join(TMP, 'repo');
-mkdirSync(join(REPO, 'src'), { recursive: true });
-git(REPO, 'init', '-q', '-b', 'main');
-writeFileSync(join(REPO, 'README.md'), 'hello\n');
-git(REPO, 'add', '-A');
-git(REPO, 'commit', '-q', '-m', 'init');
-
-test('a worker started in a git repo gets its own worktree and branch; merge, discard, remove', async () => {
-  const { body } = await json('/api/agents', 'POST', { kind: 'mock', name: 'Rook', cwd: join(REPO, 'src') });
-  const a = body.agent;
-  assert.ok(a.worktree, 'has a worktree');
-  assert.match(a.worktree.branch, /^agentix\/rook-a_/);
-  assert.equal(a.cwd, join(a.worktree.path, 'src'), 'same subfolder inside the worktree');
-  assert.ok(git(REPO, 'branch', '--list', a.worktree.branch));
-
-  // the worker edits files (the mock adapter doesn't, so write them as it would)
-  writeFileSync(join(a.cwd, 'app.js'), 'console.log(1)\n');
-  writeFileSync(join(a.worktree.path, 'README.md'), 'hello from Rook\n');
-  let st = (await json(`/api/agents/${a.id}/worktree`)).body;
-  assert.deepEqual(st.files.map((f: any) => `${f.status} ${f.path}`).sort(), ['A src/app.js', 'M README.md']);
-  assert.equal(st.target, 'main');
-  assert.match(st.diff, /hello from Rook/);
-  assert.equal(readFileSync(join(REPO, 'README.md'), 'utf8'), 'hello\n', 'the main checkout is untouched');
-  assert.equal(git(a.worktree.path, 'diff', '--cached', '--name-only'), '', 'looking at the diff staged nothing');
-
-  const m = await json(`/api/agents/${a.id}/worktree/merge`, 'POST');
-  assert.equal(m.status, 200, JSON.stringify(m.body));
-  assert.equal(m.body.into, 'main');
-  assert.equal(readFileSync(join(REPO, 'README.md'), 'utf8'), 'hello from Rook\n');
-  assert.ok(existsSync(join(REPO, 'src', 'app.js')));
-  st = (await json(`/api/agents/${a.id}/worktree`)).body;
-  assert.equal(st.files.length, 0, 'after a merge only new work shows');
-  assert.equal((await json(`/api/agents/${a.id}/worktree/merge`, 'POST')).status, 409, 'nothing to merge');
-
-  writeFileSync(join(a.cwd, 'junk.txt'), 'x');
-  assert.equal((await json(`/api/agents/${a.id}/worktree/discard`, 'POST')).status, 200);
-  assert.equal((await json(`/api/agents/${a.id}/worktree`)).body.files.length, 0);
-
-  // removing keeps unmerged work as a commit on the branch and deletes the folder
-  writeFileSync(join(a.cwd, 'wip.js'), 'wip\n');
-  await json(`/api/agents/${a.id}`, 'DELETE');
-  assert.ok(!existsSync(a.worktree.path), 'worktree folder removed');
-  assert.match(git(REPO, 'show', '--stat', a.worktree.branch), /wip\.js/, 'work kept on the branch');
-
-  // a worker that asked for no worktree, and one outside any repo
-  const plain = (await json('/api/agents', 'POST', { kind: 'mock', cwd: REPO, worktree: false })).body.agent;
-  assert.equal(plain.worktree, undefined);
-  assert.equal(plain.cwd, REPO);
-  updateSettings({ worktrees: false });
-  assert.equal((await json('/api/agents', 'POST', { kind: 'mock', cwd: REPO })).body.agent.worktree, undefined);
-  updateSettings({ worktrees: true });
-  assert.equal((await json(`/api/agents/${plain.id}/worktree`)).status, 404);
+test('agents work directly in their configured folder and the old worktree API is unavailable', async () => {
+  const { body } = await json('/api/agents', 'POST', { kind: 'mock', name: 'Rook', cwd: TMP, worktree: true });
+  assert.equal(body.agent.cwd, TMP);
+  assert.equal(body.agent.worktree, undefined, 'legacy worktree options are ignored');
+  assert.equal((await json(`/api/agents/${body.agent.id}/worktree`)).status, 404);
 });
 
 test('task board: coordinator plans with @@task, spawned workers move their tasks, kenz edits them', async () => {
   const coord = (await json('/api/agents', 'POST', { kind: 'mock', role: 'coordinator', name: 'Boss', replace: true })).body.agent;
-  await sm.steerAgent(coord.id, 'plan\nsay: @@task :: Write the docs\nsay: @@spawn kind=mock name=Builder worktree=no :: Build the app');
+  await sm.steerAgent(coord.id, 'plan\nsay: @@task :: Write the docs\nsay: @@spawn kind=mock name=Builder :: Build the app');
   const builder = await waitFor(() => sm.getAgents().find(a => a.name === 'Builder'), 5000, 'Builder spawned');
-  assert.equal(builder.worktree, undefined);
   const docs = await waitFor(() => listTasks().find(t => t.title === 'Write the docs'), 3000, 'docs task');
   assert.equal(docs.status, 'todo');
   assert.equal(docs.by, coord.id);

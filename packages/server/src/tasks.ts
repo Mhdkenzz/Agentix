@@ -2,10 +2,11 @@
 //
 // The coordinator plans with "@@task" lines, kenz edits the board in the dashboard, and the session manager
 // moves a worker's tasks along on its own: doing while it works, review when its turn ends, blocked on failure.
-import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Task, TaskStatus } from '../../shared/src/types.ts';
 import { AGENTIX_HOME } from './store.ts';
+import { isJsonRecord, readJsonFile, quarantineJsonFile } from './json-files.ts';
 
 export const TASK_STATUSES: TaskStatus[] = ['todo', 'doing', 'review', 'done', 'blocked'];
 const MAX_TITLE = 300;
@@ -17,12 +18,19 @@ let nextId = 1;
 
 export function listTasks(): Task[] {
   if (!cache) {
-    try {
-      const data = JSON.parse(readFileSync(file(), 'utf8'));
-      const tasks: Task[] = data.tasks ?? [];
+    const data = readJsonFile(file(), 'task board');
+    const valid = data === undefined || (isJsonRecord(data) && Array.isArray(data.tasks) && data.tasks.every((t: any) =>
+      t && typeof t.id === 'string' && /^t\d+$/.test(t.id) && typeof t.title === 'string'
+      && TASK_STATUSES.includes(t.status) && typeof t.by === 'string'
+      && Number.isFinite(t.createdAt) && Number.isFinite(t.updatedAt)));
+    if (!valid) {
+      quarantineJsonFile(file(), 'task board file has an invalid structure');
+      cache = []; nextId = 1;
+    } else {
+      const tasks: Task[] = data?.tasks ?? [];
       cache = tasks;
-      nextId = Math.max(Number(data.nextId) || 1, ...tasks.map(t => (Number(t.id.slice(1)) || 0) + 1));
-    } catch { cache = []; nextId = 1; }
+      nextId = Math.max(Number(data?.nextId) || 1, ...tasks.map(t => (Number(t.id.slice(1)) || 0) + 1));
+    }
   }
   return cache!.map(t => ({ ...t }));
 }
@@ -84,6 +92,21 @@ export function deleteTask(id: string): boolean {
   if (rest.length === tasks.length) return false;
   save(rest);
   return true;
+}
+
+/**
+ * Tasks that were being worked on when the server stopped go back on the board: after a restart no
+ * agent is working on them, and a task stuck in "doing" hides the work from the coordinator and kenz.
+ * Returns the tasks that changed.
+ */
+export function releaseInterruptedTasks(): Task[] {
+  const tasks = listTasks();
+  const changed = tasks.filter(t => t.status === 'doing');
+  if (!changed.length) return [];
+  const now = Date.now();
+  for (const t of changed) { t.status = 'todo'; t.updatedAt = now; }
+  save(tasks);
+  return changed.map(t => ({ ...t }));
 }
 
 /** Remove every task from the board for a fresh workspace. */

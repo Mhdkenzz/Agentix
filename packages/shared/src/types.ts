@@ -17,7 +17,7 @@ export interface Agent {
   createdAt: number;
   /** set when the agent was removed; its record and history are kept */
   archivedAt?: number;
-  /** a worker working in its own git worktree and branch (cwd is inside `path`) */
+  /** Legacy metadata from older versions; Agentix no longer creates or manages per-agent worktrees. */
   worktree?: Worktree;
   /** the model the CLI runs with (its own name for it); unset = the CLI's default */
   model?: string;
@@ -73,6 +73,21 @@ export interface Task {
   updatedAt: number;
 }
 
+export type PermissionDecision = 'approved' | 'declined';
+
+export interface PermissionRequest {
+  id: string;
+  workerId: string;
+  taskId?: string;
+  request: string;
+  status: 'pending' | PermissionDecision;
+  createdAt: number;
+  decidedAt?: number;
+  decidedBy?: string;
+  decision?: string;
+  appliedAt?: number;
+}
+
 export type EventType =
   | 'agent.created' | 'agent.updated' | 'agent.removed'
   | 'output'
@@ -94,6 +109,18 @@ export interface AgentEvent {
   from?: string;
   text?: string;
   data?: unknown;
+}
+
+/** A saved chat is one Agentix conversation, bounded by agent creation or a New session event. */
+export interface AgentChat {
+  /** Stable key: the event id that opened this chat. */
+  id: string;
+  title: string;
+  startedAt: number;
+  eventCount: number;
+  startEventId: number;
+  /** Exclusive upper event id; omitted for the current chat. */
+  beforeEventId?: number;
 }
 
 // Names pool for auto-generated agent names

@@ -62,6 +62,30 @@ test('REST errors: 404, 400, 409', async () => {
   assert.match(dup.body.error, /already the ceo/);
 });
 
+test('agent endpoints reject wrong field types instead of storing invalid records', async () => {
+  assert.equal((await json('/api/agents', 'POST', { kind: 'mock', name: 42 })).status, 400);
+  assert.equal((await json('/api/agents', 'POST', { kind: 'mock', cwd: 42 })).status, 400);
+  assert.equal((await json('/api/agents', 'POST', { kind: 'mock', prompt: { text: 'hello' } })).status, 400);
+  const agent = (await json('/api/agents', 'POST', { kind: 'mock', name: 'Validated fields' })).body.agent;
+  assert.equal((await json(`/api/agents/${agent.id}`, 'PATCH', { name: 42 })).status, 400);
+  assert.equal((await json(`/api/agents/${agent.id}`, 'PATCH', { cwd: 42 })).status, 400);
+  const saved = (await json(`/api/agents/${agent.id}`)).body.agent;
+  assert.equal(saved.name, 'Validated fields');
+  assert.equal(typeof saved.cwd, 'string');
+});
+
+test('task endpoints require string owners and only permit worker assignments', async () => {
+  assert.equal((await json('/api/tasks', 'POST', { title: 'bad owner type', owner: 123 })).status, 400);
+  const task = (await json('/api/tasks', 'POST', { title: 'unassigned task' })).body.task;
+  const lead = (await json('/api/agents')).body.agents.find((a: any) => a.role === 'ceo');
+  assert.ok(lead, 'the REST errors test created a CEO');
+  assert.equal((await json(`/api/tasks/${task.id}`, 'PATCH', { owner: { id: lead.id } })).status, 400);
+  const assignedToLead = await json(`/api/tasks/${task.id}`, 'PATCH', { owner: lead.id });
+  assert.equal(assignedToLead.status, 400);
+  const unchanged = (await json('/api/tasks')).body.tasks.find((t: any) => t.id === task.id);
+  assert.equal(unchanged.owner, undefined, 'invalid assignments do not mutate the task');
+});
+
 test('malformed URL encoding returns 400 without taking down the server', async () => {
   const r = await fetch(base + '/api/%');
   assert.equal(r.status, 400);
@@ -96,6 +120,9 @@ test('serves the dashboard: assets, SPA fallback, no path escape', async () => {
   assert.match(js.headers.get('cache-control')!, /immutable/);
   assert.match(await (await fetch(base + '/history')).text(), /id="root"/, 'client routes get index.html');
   assert.doesNotMatch(await (await fetch(base + '/..%2fsecret.txt')).text(), /nope/);
+  const head = await fetch(base + '/', { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '', 'HEAD returns headers without a body');
 
   // A prefix-only check would allow a sibling such as dist-escape-xyz/secret.txt.
   const webDist = fileURLToPath(new URL('../../web/dist/', import.meta.url));
@@ -172,7 +199,7 @@ test('CLI: clear error when the server is down', async () => {
 
 test('a second server on the same port fails cleanly without touching agents', async () => {
   const { body } = await json('/api/agents', 'POST', { kind: 'mock', prompt: 'busy' });
-  await assert.rejects(startServer(port), /already in use/);
+  await assert.rejects(startServer(port), /already in use|already using this data folder/);
   const now = (await json(`/api/agents/${body.agent.id}`)).body.agent.status;
   assert.notEqual(now, 'idle', 'a failed second server must not reset the live one');
 });

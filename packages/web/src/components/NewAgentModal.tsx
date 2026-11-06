@@ -16,7 +16,6 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   const [cwd, setCwd] = useState(server?.defaultCwd ?? '');
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState('');
-  const [worktree, setWorktree] = useState(server?.worktrees ?? true);
   const [avatar, setAvatar] = useState<number | 'random'>('random');
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState<string>();
@@ -34,7 +33,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
   async function submit(replace = false) {
     setBusy(true); setError(''); setConflict(undefined);
     try {
-      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace, model: model || undefined, ...(role === 'worker' ? { worktree } : {}) });
+      const agent = await api.create({ kind, role, name: name.trim() || undefined, cwd: cwd.trim() || undefined, prompt: prompt.trim() || undefined, avatarId: avatar, replace, model: model || undefined });
       select(agent.id);
       onClose();
     } catch (e) {
@@ -68,12 +67,6 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
           <label>Working folder <input value={cwd} onChange={e => setCwd(e.target.value)} placeholder="~/.agentix/workspace" /></label>
         </div>
         <ModelPicker kind={kind} value={model} onChange={setModel} />
-        {role === 'worker' && (
-          <label className="check wt-check" title="Only when the folder is inside a git repository">
-            <input type="checkbox" checked={worktree} onChange={e => setWorktree(e.target.checked)} />
-            Own git branch (worktree) if the folder is a git repo, so it never clashes with other workers. You merge its work when it's ready.
-          </label>
-        )}
         <label>First prompt
           <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={3} placeholder="optional: what should it do first?" />
         </label>
@@ -92,7 +85,7 @@ export function NewAgentModal({ onClose, initialRole = 'worker' }: { onClose(): 
         {conflict && (
           <div className="warn">
             {conflict}
-            <button type="button" className="btn small" onClick={() => submit(true)}>Replace it</button>
+            <button type="button" className="btn small" disabled={busy} onClick={() => submit(true)}>{busy ? 'Replacing…' : 'Replace it'}</button>
           </div>
         )}
         <div className="row end">

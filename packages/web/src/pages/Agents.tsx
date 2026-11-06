@@ -116,7 +116,7 @@ export function Agents() {
                 <td className="num" title={usage[a.id] ? `${usage[a.id].turns} turns · ${usage[a.id].input.toLocaleString()} in · ${usage[a.id].output.toLocaleString()} out` : 'no usage reported yet'}>
                   {usage[a.id] ? fmtTokens(usage[a.id].input + usage[a.id].output) : <span className="muted">–</span>}</td>
                 <td className="num">{fmtCost(usage[a.id]?.cost) || <span className="muted">–</span>}</td>
-                <td className="ellipsis mono small" title={a.worktree ? `${a.cwd}\nbranch ${a.worktree.branch}` : a.cwd}>{a.worktree && <span className="branch-tag">⎇</span>}{a.cwd}</td>
+                <td className="ellipsis mono small" title={a.cwd}>{a.cwd}</td>
                 <td>
                   <div className="row">
                     <button className="btn small" onClick={() => { select(a.id); navigate('/'); }}>Watch</button>

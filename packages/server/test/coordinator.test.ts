@@ -2,7 +2,7 @@
 import { TMP, waitFor, sleep } from './helpers.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventBus } from '../src/bus.ts';
 import { SessionManager } from '../src/sessions.ts';
@@ -129,6 +129,50 @@ test('coordinator @@tell ceo starts a CEO turn (queued while the CEO is busy)', 
   await waitFor(() => evs(ceo.id, 'message').some(e => e.from === coord.id && e.text === 'the delegation update is complete'), 3000, 'legacy CEO report');
   await waitFor(() => evs(ceo.id, 'output').some(e => /delegation update is complete/.test(e.text!)), 10000, 'legacy CEO report turn');
   assert.equal(evs(coord.id, 'error').some(e => /use "@@tell ceo/.test(e.text!)), false, 'legacy report is not rejected');
+});
+
+test('@@tell reaches a working worker as a message, without an error or an interruption', async () => {
+  const coord = sm.getAgents().find(a => a.role === 'coordinator')!; // Boss (mock)
+  await idle(coord.id).catch(() => {});
+  // A worker that stays busy for a second, so the message really arrives mid-turn.
+  const script = join(TMP, 'slow-codex');
+  const log = join(TMP, 'slow-codex.args');
+  writeFileSync(script, [
+    '#!/bin/bash',
+    'if [ "$1" = "--version" ]; then echo "slow 9.9.9"; exit 0; fi',
+    `printf '%s\\n' "$*" | tr '\\n' ' ' >> "${log}"; echo >> "${log}"`,
+    'sleep 1',
+    `echo '{"type":"thread.started","thread_id":"th-slow"}'`,
+    `echo '{"type":"item.completed","item":{"type":"agent_message","text":"slow job done"}}'`,
+    `echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":5}}'`,
+  ].join('\n'));
+  chmodSync(script, 0o755);
+  updateSettings({ cliPaths: { codex: script } });
+  try {
+    const worker = await sm.createAgent('codex', { name: 'BusyWorker', prompt: 'slow job' });
+    await waitFor(() => sm.isRunning(worker.id), 5000, 'worker busy');
+    const errorsBefore = evs(coord.id, 'error').length;
+
+    await sm.steerAgent(coord.id, 'say: @@tell BusyWorker :: the endpoint moved to /v2');
+    await waitFor(() => evs(worker.id, 'message').some(e => e.from === coord.id && e.text === 'the endpoint moved to /v2'), 5000, 'message delivered');
+    await sleep(300);
+    assert.equal(evs(coord.id, 'error').length, errorsBefore, 'a message to a worker is not an error');
+    assert.ok(evs(coord.id, 'message').some(e => e.text === `told BusyWorker (${worker.id})`), 'the coordinator hears that it went through');
+    assert.equal(evs(worker.id, 'steer').length, 0, 'and the worker is not interrupted');
+    assert.equal(sm.isRunning(worker.id), true, 'it is still in its own turn');
+
+    // The message waits in its inbox and is the first thing it reads on the next turn.
+    await waitFor(() => {
+      try { return readFileSync(log, 'utf8').trim().split('\n').length >= 2; } catch { return false; }
+    }, 15000, 'the worker reads the message on its next turn');
+    const second = readFileSync(log, 'utf8').trim().split('\n')[1];
+    assert.match(second, /\[FROM COORDINATOR Boss\]/, 'the worker knows who wrote it');
+    assert.match(second, /the endpoint moved to \/v2/);
+    assert.ok(evs(worker.id, 'output').some(e => e.text!.includes('slow job done')), 'the first turn ran to the end');
+    await sm.removeAgent(worker.id);
+  } finally {
+    updateSettings({ cliPaths: {} });
+  }
 });
 
 test('an unanswered CEO request is retried three times and reported without interruption', async () => {

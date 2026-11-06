@@ -3,11 +3,12 @@
 // (`server` and `doctor` are the exceptions: they run/inspect things locally).
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
+import { getApiToken } from '../../server/src/auth.ts';
 
 const PORT = Number(process.env.AGENTIX_PORT) || 4317;
 const SERVER_URL = process.env.AGENTIX_URL || `http://127.0.0.1:${PORT}`;
-/** The API token, when the server runs with AGENTIX_TOKEN. */
-const TOKEN = process.env.AGENTIX_TOKEN || '';
+/** Per-install API token, shared with the server unless AGENTIX_TOKEN overrides it. */
+const TOKEN = getApiToken();
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
@@ -120,9 +121,9 @@ async function loadNames() {
 // ---------- commands ----------
 
 async function cmdServer() {
-  const { startServer } = await import('../../server/src/index.ts');
+  const { bootstrapServer } = await import('../../server/src/server-bootstrap.ts');
+  const { server, sessionManager, port } = await bootstrapServer(PORT);
   const { store } = await import('../../server/src/store.ts');
-  const { server, sessionManager, port } = await startServer(PORT);
   console.log(`${GREEN}✓${RESET} Agentix server running on \x1b[36mhttp://127.0.0.1:${port}${RESET}`);
   console.log(`${DIM}  Store: ${store.getStoreType()}  |  Press Ctrl+C to stop${RESET}\n`);
   if (TOKEN) {
@@ -136,8 +137,10 @@ async function cmdServer() {
     stopping = true;
     console.log(`\n${DIM}Stopping agents and shutting down…${RESET}`);
     await sessionManager.shutdown();
+    const closed = new Promise<void>(resolve => server.once('close', () => resolve()));
     server.close();
     server.closeAllConnections?.();
+    await closed;
     process.exit(0);
   };
   process.on('SIGINT', stop);
@@ -152,6 +155,12 @@ async function cmdDoctor() {
   console.log(`\n  Agentix Doctor\n  ${'='.repeat(20)}`);
   console.log(`  Node:   ${process.version}`);
   console.log(`  Store:  ${sqlite ? 'sqlite' : 'json (node:sqlite unavailable)'}${process.env.AGENTIX_STORE === 'json' ? ' — forced to json by AGENTIX_STORE' : ''}`);
+  const processCleanup = process.platform === 'linux'
+    ? `${GREEN}verified process-group cleanup${RESET}`
+    : process.platform === 'win32'
+      ? `${DIM}direct CLI cleanup only; child process trees cannot be verified${RESET}`
+      : `${DIM}live process-group stops work; restart cleanup cannot verify old process identity${RESET}`;
+  console.log(`  Process cleanup: ${processCleanup}`);
   let serverUp = false;
   try { await api('/api/agents'); serverUp = true; } catch { /* down */ }
   console.log(`  Server: ${serverUp ? `${GREEN}up${RESET} at ${SERVER_URL}` : `${DIM}not running (${SERVER_URL})${RESET}`}`);
@@ -168,20 +177,18 @@ async function cmdSpawn(args: string[]) {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
-    allowNegative: true,          // --no-worktree
     options: {
       role: { type: 'string', default: 'worker' },
       avatar: { type: 'string', default: 'random' },
       cwd: { type: 'string' },
       name: { type: 'string' },
       model: { type: 'string' },
-      worktree: { type: 'boolean' },
       replace: { type: 'boolean', default: false },
     },
   });
   const [kind, ...rest] = positionals;
   if (!kind) {
-    throw new CliError('usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--name N] [--cwd DIR] [--model M] [--worktree|--no-worktree] [--replace] "<prompt>"');
+    throw new CliError('usage: agentix spawn <kind> [--role worker|coordinator|ceo] [--avatar 0-9|random] [--name N] [--cwd DIR] [--model M] [--replace] "<prompt>"');
   }
   const avatarId = values.avatar === 'random' ? 'random' : Number(values.avatar);
   const { agent: a } = await api('/api/agents', 'POST', {
@@ -193,7 +200,6 @@ async function cmdSpawn(args: string[]) {
     prompt: rest.join(' ') || undefined,
     replace: values.replace,
     ...(values.model ? { model: values.model } : {}),
-    ...(typeof values.worktree === 'boolean' ? { worktree: values.worktree } : {}),
   });
   console.log(`${color(a.id)}✓ Spawned ${a.name} (${a.id})${RESET}`);
   console.log(`  kind: ${a.kind}  |  role: ${a.role}  |  avatar: ${a.avatarId}  |  status: ${a.status}  |  cwd: ${a.cwd}\n`);
@@ -239,9 +245,9 @@ const HELP = `\x1b[1mAgentix\x1b[0m — AI agent orchestration
 
   Usage:
     agentix server                          Start the server (AGENTIX_PORT, default 4317)
-    agentix doctor                          Check node, store and installed agent CLIs
+    agentix doctor                          Check node, store, process cleanup and installed agent CLIs
     agentix spawn <kind> [opts] "<prompt>"  Spawn an agent (kinds: codex, opencode, claude, pi, hermes, gemini, aider, goose)
-        --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --model M  --worktree|--no-worktree  --replace
+        --role worker|coordinator|ceo  --avatar 0-9|random  --name N  --cwd DIR  --model M  --replace
     agentix ls                              List agents
     agentix logs <id> [-f]                  Show (or follow) an agent's events
     agentix steer <id> "<text>"             Interrupt if busy, then continue the session with <text>

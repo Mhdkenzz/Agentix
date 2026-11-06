@@ -4,16 +4,21 @@
   "private": true,
   "description": "AI agent orchestration — web dashboard + CLI",
   "engines": {
-    "node": ">=22.18"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "workspaces": [
     "packages/*"
   ],
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.1"
+    }
+  },
   "scripts": {
     "test": "node --test packages/server/test/*.test.ts",
     "typecheck": "npm run typecheck -w @agentix/web && npm run typecheck -w @agentix/server",
     "lint": "eslint .",
-    "server": "node packages/cli/src/agentix.ts server",
+    "server": "tsx packages/cli/src/agentix.ts server",
     "dev:web": "npm run dev -w @agentix/web",
     "build": "npm run build -w @agentix/web",
     "e2e": "playwright test"
@@ -25,6 +30,7 @@
     "eslint": "^9.39.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "globals": "^15.15.0",
+    "tsx": "^4.20.6",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.72.0"
   }

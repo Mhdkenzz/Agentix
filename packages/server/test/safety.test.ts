@@ -31,9 +31,12 @@ test('the office has a limit on agents and on turns at the same time', async () 
     await sm.steerAgent(a.id, 'go');
     await waitFor(() => sm.isRunning(a.id), 2000, 'the first agent is working');
     await sm.steerAgent(b.id, 'go');
-    await waitFor(() => evs(b.id, 'error').some(e => /Too many agents are working/.test(e.text!)), 3000, 'the second is refused');
-    assert.equal(sm.isRunning(b.id), false, 'and it does not start');
+    // At the limit a turn waits for a slot instead of being refused (robustness.test.ts covers the rest).
+    await waitFor(() => /^queued/.test(sm.getAgent(b.id)!.activity), 3000, 'the second waits for a slot');
+    assert.equal(sm.isRunning(b.id), false, 'and it does not start beside the first');
+    assert.equal(evs(b.id, 'error').length, 0, 'no work is refused');
     await idle(a.id);
+    await waitFor(() => !sm.isRunning(b.id) && sm.getAgent(b.id)!.status === 'idle', 10000, 'then it runs');
   } finally {
     delete process.env.AGENTIX_MAX_CONCURRENT_TURNS;
   }

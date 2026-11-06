@@ -1,14 +1,15 @@
 // Searchable event history across every agent ever created (removed ones included), with "resume"
 // (a new turn on the agent's own session) for agents that are still in the office.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.ts';
 import { useStore } from '../store.ts';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
 import { EventLine } from '../components/EventLine.tsx';
-import type { AgentEvent } from '../../../shared/src/types.ts';
+import type { AgentChat, AgentEvent } from '../../../shared/src/types.ts';
 
 const TYPES = ['output', 'tool', 'thinking', 'steer', 'message', 'session', 'error', 'status', 'agent.created', 'agent.removed'];
+const DEFAULT_TYPES = ['output', 'tool', 'thinking', 'steer', 'message', 'error'];
 const PAGE = 150;
 
 export function History() {
@@ -20,33 +21,81 @@ export function History() {
   const lastEventId = useStore(s => s.lastEventId);
   const [params, setParams] = useSearchParams();
   const agentId = params.get('agent') ?? '';
+  const chatId = params.get('chat') ?? '';
+  const lastAgentEvent = useStore(s => agentId ? s.events[agentId]?.at(-1) : undefined);
+  const chatBoundaryEventId = lastAgentEvent?.type === 'session' || lastAgentEvent?.type === 'agent.created' ? lastAgentEvent.id : undefined;
+  const [chats, setChats] = useState<AgentChat[]>([]);
   const [q, setQ] = useState(params.get('q') ?? '');
-  const [types, setTypes] = useState<string[]>(['output', 'tool', 'thinking', 'steer', 'message', 'error']);
+  const [types, setTypes] = useState<string[]>(params.has('types')
+    ? (params.get('types') ?? '').split(',').filter(t => TYPES.includes(t))
+    : DEFAULT_TYPES);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [stats, setStats] = useState<Record<string, { count: number; lastTs: number }>>({});
   const [more, setMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const loadSequence = useRef(0);
   const [resumeText, setResumeText] = useState('continue where you left off');
   const [note, setNote] = useState('');
+  const selectedChat = chats.find(c => c.id === chatId);
 
   async function load(before?: number) {
+    const sequence = ++loadSequence.current;
     setLoading(true);
+    setLoadError('');
+    if (types.length === 0) {
+      setEvents([]); setStats({}); setMore(false); setLoading(false);
+      return;
+    }
     const p = new URLSearchParams({ limit: String(PAGE) });
     if (q) p.set('q', q);
     if (agentId) p.set('agent', agentId);
-    if (types.length) p.set('type', types.join(','));
-    if (before) p.set('before', String(before));
+    p.set('type', types.join(','));
+    if (selectedChat) {
+      p.set('after', String(selectedChat.startEventId - 1));
+      const upper = before ?? selectedChat.beforeEventId;
+      if (upper) p.set('before', String(upper));
+    } else if (before) p.set('before', String(before));
     try {
-      const r = await fetch(`/api/events?${p}`).then(r => r.json());
+      const r = await api.searchEvents(p);
+      if (sequence !== loadSequence.current) return;
       setEvents(prev => before ? [...prev, ...r.events] : r.events);
       setStats(Object.fromEntries(r.stats.map((s: any) => [s.agentId, s])));
       setMore(r.events.length === PAGE);
-    } finally { setLoading(false); }
+    } catch (e) {
+      if (sequence !== loadSequence.current) return;
+      setLoadError(e instanceof Error ? e.message : String(e));
+      if (!before) setEvents([]);
+      setMore(false);
+    } finally { if (sequence === loadSequence.current) setLoading(false); }
   }
 
   // Reload on filter change, and (debounced) as new events arrive.
   useEffect(() => { const t = setTimeout(() => load(), 250); return () => clearTimeout(t); }, // eslint-disable-next-line react-hooks/exhaustive-deps
-    [q, agentId, types.join(','), Math.floor(lastEventId / 25)]);
+    [q, agentId, chatId, selectedChat?.startEventId, selectedChat?.beforeEventId, types.join(','), Math.floor(lastEventId / 25)]);
+
+  // Keep filters bookmarkable, and follow browser back/forward navigation.
+  useEffect(() => {
+    setQ(params.get('q') ?? '');
+    setTypes(params.has('types')
+      ? (params.get('types') ?? '').split(',').filter(t => TYPES.includes(t))
+      : DEFAULT_TYPES);
+  }, [params]);
+
+  function updateFilters(nextQ: string, nextTypes: string[]) {
+    setQ(nextQ); setTypes(nextTypes);
+    const next = new URLSearchParams(params);
+    if (nextQ) next.set('q', nextQ); else next.delete('q');
+    // Presence with an empty value intentionally means no event types selected.
+    next.set('types', nextTypes.join(','));
+    setParams(next, { replace: true });
+  }
+
+  useEffect(() => {
+    setChats([]);
+    if (!agentId) return;
+    api.chats(agentId).then(setChats).catch(() => {});
+  }, [agentId, chatBoundaryEventId]);
 
   // Removed agents come from the server; their history is kept.
   const removedCount = Object.keys(archived).length;
@@ -55,7 +104,8 @@ export function History() {
 
   const agent = agentId ? agents[agentId] : undefined;
   const list = Object.values(agents).sort((a, b) => (stats[b.id]?.lastTs ?? b.createdAt) - (stats[a.id]?.lastTs ?? a.createdAt));
-  const pick = (id: string) => { const n = new URLSearchParams(params); if (id) n.set('agent', id); else n.delete('agent'); setParams(n); setNote(''); };
+  const pick = (id: string) => { const n = new URLSearchParams(params); if (id) n.set('agent', id); else n.delete('agent'); n.delete('chat'); setParams(n); setNote(''); };
+  const pickChat = (id: string) => { const n = new URLSearchParams(params); if (id) n.set('chat', id); else n.delete('chat'); setParams(n); };
 
   async function resume() {
     if (!agent || !resumeText.trim()) return;
@@ -86,11 +136,17 @@ export function History() {
       </aside>
       <section className="hist-main">
         <div className="filters">
-          <input placeholder={`Search ${agent ? agent.name + "'s" : 'all'} history…`} value={q} onChange={e => setQ(e.target.value)} />
+          {agent && <select aria-label="Saved chats" value={chatId} onChange={e => pickChat(e.target.value)}>
+            <option value="">All chats</option>
+            {chats.map(chat => <option key={chat.id} value={chat.id}>
+              {new Date(chat.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · {chat.title} · {chat.eventCount} events
+            </option>)}
+          </select>}
+          <input placeholder={`Search ${agent ? agent.name + "'s" : 'all'} history…`} value={q} onChange={e => updateFilters(e.target.value, types)} />
           <div className="chips">
             {TYPES.map(t => (
               <button key={t} className={`chip ${types.includes(t) ? 'on' : ''}`}
-                onClick={() => setTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])}>{t}</button>
+                onClick={() => updateFilters(q, types.includes(t) ? types.filter(x => x !== t) : [...types, t])}>{t}</button>
             ))}
           </div>
         </div>
@@ -112,6 +168,7 @@ export function History() {
           </div>
         )}
         {note && <div className="muted small pad">{note}</div>}
+        {loadError && <div className="error" role="alert">Could not load history: {loadError} <button className="btn small" disabled={loading} onClick={() => load()}>{loading ? 'Retrying…' : 'Retry'}</button></div>}
         <div className="hist-log">
           {events.map(e => <EventLine key={e.id} e={e} showAgent={!agentId} />)}
           {!events.length && !loading && <div className="muted pad">Nothing found.</div>}

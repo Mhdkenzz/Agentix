@@ -134,7 +134,7 @@ test('workers get the [SHARED CONTEXT] block and can add to it with @@remember',
   await idle(w.id);
   // the prompt is the last argument; it spans lines, so read the raw log (args are NUL-separated)
   const prompt = readFileSync(join(TMP, 'codex.args'), 'utf8').split('\0').filter(a => a.includes('deploy to staging')).at(-1)!;
-  assert.match(prompt, /^\[SHARED CONTEXT\]/);
+  assert.match(prompt, /\[SHARED CONTEXT\][\s\S]*ship\.sh/);
   assert.match(prompt, /ship\.sh/);
   assert.match(prompt, /\[END SHARED CONTEXT\]\n\ndeploy to staging$/);
 

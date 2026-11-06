@@ -2,7 +2,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
 import { useStore, sinceClear, fmtTokens, fmtCost } from '../store.ts';
-import { WorktreeBar } from './WorktreeBar.tsx';
 import { ChangeModelModal } from './ModelPicker.tsx';
 import { SessionButtons } from './SessionButtons.tsx';
 import { AvatarThumb } from '../avatars/AvatarThumb.tsx';
@@ -52,9 +51,12 @@ export function AgentPanel() {
   async function steer() {
     const t = text.trim();
     if (!t) return;
-    setText('');
     stick.current = true;
-    await act(() => viaCoordinator ? api.askCoordinator(t, agent!.id) : api.steer(agent!.id, t));
+    setError('');
+    try {
+      await (viaCoordinator ? api.askCoordinator(t, agent!.id) : api.steer(agent!.id, t));
+      setText(current => current.trim() === t ? '' : current);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
 
   return (
@@ -85,7 +87,6 @@ export function AgentPanel() {
           ◔ {fmtTokens(usage.input + usage.output)} tokens <span className="muted">({fmtTokens(usage.input)} in, {fmtTokens(usage.output)} out)</span>{usage.cost ? <> · <span className="cost">{fmtCost(usage.cost)}</span></> : ''}
         </div>
       )}
-      <WorktreeBar agent={agent} onError={setError} />
       {myTasks.length > 0 && (
         <div className="panel-tasks">
           <div className="panel-section-label">Assigned tasks</div>

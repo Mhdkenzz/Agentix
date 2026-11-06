@@ -13,10 +13,11 @@ const MD = '# Team\nintro\n\n## Everyone\nBe brief.\n\n## CEO\nTalk to kenz.\n\n
 test('each role gets the Everyone section plus its own', () => {
   assert.deepEqual([...sections(MD).keys()], ['everyone', 'ceo', 'coordinator', 'worker']);
   const worker = roleGuide('worker', MD);
-  assert.match(worker, /^\[AGENTS\.MD\] How to work as the worker:\nBe brief\.\n\nRun the tests\.$/);
+  assert.match(worker, /^\[AGENTS\.MD\] How to work as the worker:\nBe brief\.\n\nRun the tests\./);
+  assert.match(worker, /\[PERMISSION PROTOCOL\]/);
   assert.ok(!worker.includes('Plan the work'));
   assert.match(roleGuide('ceo', MD), /Be brief\.\n\nTalk to kenz\./);
-  assert.equal(roleGuide('worker', '# nothing here'), '');
+  assert.match(roleGuide('worker', '# nothing here'), /\[PERMISSION PROTOCOL\]/);
 });
 
 test('the default AGENTS.md has a section for every role', () => {

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import type { Agent, AgentEvent, Status, Usage } from '../../shared/src/types.ts';
 import { withHistory } from './history.ts';
+import { isJsonRecord } from './json-files.ts';
 
 /** Data directory: $AGENTIX_HOME, else ~/.agentix. Tests point this at a temp dir. */
 export const AGENTIX_HOME = process.env.AGENTIX_HOME || join(homedir(), '.agentix');
@@ -21,6 +22,8 @@ type NewEvent = Omit<AgentEvent, 'id' | 'ts' | 'agentId'>;
 
 export interface IStore {
   getStoreType(): 'sqlite' | 'json';
+  /** Current disk persistence failures for the JSON fallback, if any. */
+  storageErrors(): string[];
   /** live agents (not removed) */
   getAgents(): Agent[];
   /** every agent ever created, removed ones included (they have archivedAt) */
@@ -60,10 +63,25 @@ export interface EventSearch {
   agentId?: string;
   types?: string[];
   before?: number;     // event id, for paging backwards
+  after?: number;      // event id, exclusive lower bound
   limit?: number;      // default 200
 }
 
 const BUSY: Status[] = ['starting', 'thinking', 'working'];
+
+function isAgentRecord(value: unknown): value is Agent {
+  return isJsonRecord(value) && typeof value.id === 'string' && typeof value.name === 'string'
+    && typeof value.kind === 'string' && ['worker', 'coordinator', 'ceo'].includes(value.role)
+    && Number.isInteger(value.avatarId) && typeof value.cwd === 'string'
+    && ['starting', 'idle', 'thinking', 'working', 'waiting_input', 'error', 'stopped'].includes(value.status)
+    && typeof value.activity === 'string' && Number.isFinite(value.createdAt)
+    && (value.archivedAt === undefined || Number.isFinite(value.archivedAt));
+}
+
+function isEventRecord(value: unknown): value is AgentEvent {
+  return isJsonRecord(value) && Number.isSafeInteger(value.id) && value.id > 0
+    && typeof value.agentId === 'string' && typeof value.type === 'string' && Number.isFinite(value.ts);
+}
 
 /** One JSON event per line, read back into events. A torn last line is skipped. */
 function readEventLines(path: string): AgentEvent[] {
@@ -74,7 +92,7 @@ function readEventLines(path: string): AgentEvent[] {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
-      if (e && typeof e.id === 'number') out.push(e);
+      if (isEventRecord(e)) out.push(e);
     } catch { /* a torn line (the server died mid-write) */ }
   }
   return out;
@@ -82,9 +100,9 @@ function readEventLines(path: string): AgentEvent[] {
 
 /** Write the whole events file (used when events are deleted, not appended). */
 function writeEventLines(path: string, events: AgentEvent[]): void {
-  try {
-    writeFileSync(path, events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
-  } catch { /* reported by the caller */ }
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
+  renameSync(temporary, path);
 }
 
 // ---------- SQLite ----------
@@ -210,6 +228,7 @@ function openSqlite(home: string): IStore | null {
 
   const s: IStore = {
     getStoreType: () => 'sqlite',
+    storageErrors: () => [],
     getAgents: () => q.agents.all().map(toAgent),
     getAllAgents: () => q.allAgents.all().map(toAgent),
     getAgent: (id, includeArchived) => {
@@ -252,6 +271,7 @@ function openSqlite(home: string): IStore | null {
       }
       if (f.agentId) { where.push('e.agentId = ?'); args.push(f.agentId); }
       if (f.types?.length) { where.push(`e.type IN (${f.types.map(() => '?').join(',')})`); args.push(...f.types); }
+      if (f.after) { where.push('e.id > ?'); args.push(f.after); }
       if (f.before) { where.push('e.id < ?'); args.push(f.before); }
       const sql = `SELECT e.* FROM events e ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.id DESC LIMIT ?`;
       return db.prepare(sql).all(...args, f.limit ?? 200).map(toEvent);
@@ -270,8 +290,16 @@ function openSqlite(home: string): IStore | null {
   const legacyPath = jsonPath(home);
   const legacyEventsPath = jsonEventsPath(home);
   if (existsSync(legacyPath) && (q.countAgents.get() as any).n === 0) {
+    let data: any;
+    try { data = JSON.parse(readFileSync(legacyPath, 'utf-8')); }
+    catch (error: any) {
+      throw new Error(`Cannot import ${legacyPath}: invalid JSON. The original file is preserved; repair it or move it aside before restarting. (${error?.message ?? String(error)})`);
+    }
+    if (!isJsonRecord(data) || !Array.isArray(data.agents) || !data.agents.every(isAgentRecord)
+      || (data.events !== undefined && (!Array.isArray(data.events) || !data.events.every(isEventRecord)))) {
+      throw new Error(`Cannot import ${legacyPath}: invalid data shape. The original file is preserved; repair it or move it aside before restarting.`);
+    }
     try {
-      const data = JSON.parse(readFileSync(legacyPath, 'utf-8'));
       const imported = [...(Array.isArray(data.events) ? data.events : []), ...readEventLines(legacyEventsPath)]
         .sort((a: any, b: any) => a.id - b.id);
       const seen = new Set<number>();
@@ -285,8 +313,9 @@ function openSqlite(home: string): IStore | null {
       db.exec('COMMIT');
       renameSync(legacyPath, legacyPath + '.imported');
       if (existsSync(legacyEventsPath)) renameSync(legacyEventsPath, legacyEventsPath + '.imported');
-    } catch {
+    } catch (error: any) {
       try { db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+      throw new Error(`Could not import ${legacyPath}; the original file is preserved. (${error?.message ?? String(error)})`);
     }
   }
 
@@ -306,19 +335,34 @@ function openJson(home: string): IStore {
   let agents: Agent[] = [];
   let events: AgentEvent[] = [];
   let nextEventId = 1;
-  try {
-    if (existsSync(path)) {
-      const data = JSON.parse(readFileSync(path, 'utf-8'));
-      agents = data.agents || [];
-      nextEventId = data.nextEventId || 1;
-      if (Array.isArray(data.events)) {
-        // The old format kept the events in the same file: move them to the append-only one.
-        events = data.events;
-        nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, e.id), 0) + 1);
-        writeEventLines(eventsPath, events);
-      }
+  let agentWriteError: string | undefined;
+  let eventWriteError: string | undefined;
+  const reportWriteError = (kind: 'agent snapshot' | 'event journal', error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    const alreadyFailing = kind === 'agent snapshot' ? agentWriteError !== undefined : eventWriteError !== undefined;
+    if (kind === 'agent snapshot') agentWriteError = detail;
+    else eventWriteError = detail;
+    if (!alreadyFailing) console.error(`agentix: cannot write ${kind} in ${home}: ${detail}`);
+  };
+  if (existsSync(path)) {
+    let data: any;
+    try { data = JSON.parse(readFileSync(path, 'utf-8')); }
+    catch (error: any) {
+      throw new Error(`Cannot open ${path}: invalid JSON. The original file is preserved; repair it or move it aside before restarting. (${error?.message ?? String(error)})`);
     }
-  } catch { /* fresh start */ }
+    if (!isJsonRecord(data) || !Array.isArray(data.agents) || !data.agents.every(isAgentRecord)
+      || (data.events !== undefined && (!Array.isArray(data.events) || !data.events.every(isEventRecord)))) {
+      throw new Error(`Cannot open ${path}: invalid data shape. The original file is preserved; repair it or move it aside before restarting.`);
+    }
+    agents = data.agents;
+    nextEventId = Number.isSafeInteger(data.nextEventId) && data.nextEventId > 0 ? data.nextEventId : 1;
+    if (Array.isArray(data.events)) {
+      // The old format kept the events in the same file: move them to the append-only one.
+      events = data.events;
+      nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, Number(e?.id) || 0), 0) + 1);
+      writeEventLines(eventsPath, events);
+    }
+  }
   if (!events.length) {
     events = readEventLines(eventsPath);
     nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, e.id), 0) + 1);
@@ -328,7 +372,12 @@ function openJson(home: string): IStore {
   let saveTimer: NodeJS.Timeout | undefined;
   const flush = () => {
     saveTimer = undefined;
-    try { writeFileSync(path, JSON.stringify({ agents, nextEventId })); } catch { /* ignore */ }
+    const temporary = `${path}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ agents, nextEventId }));
+      renameSync(temporary, path);
+      agentWriteError = undefined;
+    } catch (error) { reportWriteError('agent snapshot', error); }
   };
   const save = () => { if (!saveTimer) saveTimer = setTimeout(flush, 200); };
   process.on('exit', () => { if (saveTimer) { clearTimeout(saveTimer); flush(); } });
@@ -341,6 +390,7 @@ function openJson(home: string): IStore {
 
   return {
     getStoreType: () => 'json',
+    storageErrors: () => [agentWriteError && `Agent snapshot: ${agentWriteError}`, eventWriteError && `Event journal: ${eventWriteError}`].filter((v): v is string => Boolean(v)),
     getAgents: () => agents.filter(a => !a.archivedAt).map(a => ({ ...a })),
     getAllAgents: () => agents.map(a => ({ ...a })),
     getAgent: (id, includeArchived) => {
@@ -355,10 +405,16 @@ function openJson(home: string): IStore {
     removeAgent: id => {
       agents = agents.filter(a => a.id !== id);
       events = events.filter(e => e.agentId !== id);
-      writeEventLines(eventsPath, events);
+      try { writeEventLines(eventsPath, events); eventWriteError = undefined; }
+      catch (error) { reportWriteError('event journal', error); throw error; }
       save();
     },
-    reset: () => { agents = []; events = []; nextEventId = 1; writeEventLines(eventsPath, events); save(); },
+    reset: () => {
+      agents = []; events = []; nextEventId = 1;
+      try { writeEventLines(eventsPath, events); eventWriteError = undefined; }
+      catch (error) { reportWriteError('event journal', error); throw error; }
+      save();
+    },
     getEvents: (after = 0, limit = -1) => tail(events.filter(e => e.id > after), limit),
     getAgentEvents: (agentId, after = 0, limit = -1) => tail(events.filter(e => e.agentId === agentId && e.id > after), limit),
     searchEvents: f => {
@@ -367,6 +423,7 @@ function openJson(home: string): IStore {
       for (let i = events.length - 1; i >= 0 && out.length < (f.limit ?? 200); i--) {
         const e = events[i];
         if (f.before && e.id >= f.before) continue;
+        if (f.after && e.id <= f.after) continue;
         if (f.agentId && e.agentId !== f.agentId) continue;
         if (f.types?.length && !f.types.includes(e.type)) continue;
         if (q && !(e.text ?? '').toLowerCase().includes(q)) continue;
@@ -398,14 +455,19 @@ function openJson(home: string): IStore {
     pruneEvents: (before, keep) => {
       const n = events.length;
       events = events.filter(e => e.ts >= before || keep.includes(e.type));
-      if (events.length !== n) { writeEventLines(eventsPath, events); save(); }
+      if (events.length !== n) {
+        try { writeEventLines(eventsPath, events); eventWriteError = undefined; }
+        catch (error) { reportWriteError('event journal', error); throw error; }
+        save();
+      }
       return n - events.length;
     },
     appendEvent: (e, agentId) => {
       const full: AgentEvent = { ...e, id: nextEventId++, ts: Date.now(), agentId };
       events.push(full);
       // Append-only: one line, no rewrite of everything that came before.
-      try { appendFileSync(eventsPath, JSON.stringify(full) + '\n'); } catch { /* reported on the next write */ }
+      try { appendFileSync(eventsPath, JSON.stringify(full) + '\n'); }
+      catch (error) { reportWriteError('event journal', error); }
       save();
       return full;
     },

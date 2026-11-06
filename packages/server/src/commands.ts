@@ -3,7 +3,7 @@
 //   @@spawn kind=codex name=Rook avatar=random cwd=/path :: <task>
 //   @@steer <agent id or name> :: <instructions>
 //   @@stop <agent id or name>
-//   @@tell <coordinator|ceo> :: <message>
+//   @@tell <agent id or name> :: <message>          (never interrupts: waits in the target's inbox)
 //   @@remember :: <fact for the team's shared context>   (any agent, workers included)
 //   @@task owner=<agent> :: <title>                      new task on the board (coordinator)
 //   @@task <id> status=<todo|doing|review|done|blocked> owner=<agent> :: <note>   update a task
@@ -17,9 +17,10 @@ export type Command =
   | { op: 'stop'; target: string; line: string }
   | { op: 'tell'; target: string; text: string; line: string }
   | { op: 'remember'; text: string; line: string }
+  | { op: 'approve' | 'decline'; id: string; text: string; line: string }
   | { op: 'task'; id?: string; opts: Record<string, string>; text: string; line: string };
 
-const OPS = ['spawn', 'steer', 'stop', 'tell', 'remember', 'task'];
+const OPS = ['spawn', 'steer', 'stop', 'tell', 'remember', 'task', 'approve', 'decline'];
 
 /** Any line that looks like a command: "@@word ...". The verb may be unknown (a typo). */
 const LINE = /^\s*(?:[-*>]\s*)?`?@@(\w+)\b(.*?)`?\s*$/i;
@@ -86,6 +87,9 @@ export function parseCommands(text: string): { commands: Command[]; errors: stri
     } else if (op === 'stop') {
       if (!head) { errors.push(`${line}: stop needs an agent`); continue; }
       commands.push({ op: 'stop', target: head, line });
+    } else if (op === 'approve' || op === 'decline') {
+      if (!head || !body) { errors.push(`${line}: ${op} needs "<permission request id> :: <decision>"`); continue; }
+      commands.push({ op, id: head, text: body, line });
     } else {
       if (!head || !body) { errors.push(`${line}: ${op} needs "<target> :: <text>"`); continue; }
       commands.push({ op: op as 'steer' | 'tell', target: head, text: body, line });
@@ -116,12 +120,16 @@ To act on the team, write commands on their own lines in your reply (the server 
   @@steer <agent id or name> :: <instructions>
   @@stop <agent id or name>
   @@tell ceo :: <short report for the CEO>
+  @@tell <agent id or name> :: <a message for that agent: it waits, it does not interrupt its turn>
   @@remember :: <a fact every agent should know, e.g. a decision, a path, a gotcha>
   @@task owner=<agent name> :: <task title>        (put your plan on the task board)
   @@task <task id> status=<todo|doing|review|done|blocked> :: <optional note>
+  @@approve <permission id> :: <approved action and limit>
+  @@decline <permission id> :: <brief reason>
 Leave out model= to use the CLI's default model. A spawn with a task creates a task for the new worker. When a worker finishes a turn its tasks move to review;
-check the work, then mark them done or steer the worker. Workers in a git repo get their own branch; kenz merges.
+check the work, then mark them done or steer the worker. Workers use the assigned working directory directly; avoid assigning overlapping file changes at the same time.
 Workers see the team brief, shared notes and related findings of other agents under [SHARED CONTEXT].
+Permission requests are saved as p1, p2, ... . Review the requested action and its impact. Use @@approve only for the exact scope you accept; approval reopens the worker's blocked task and starts a fresh turn. Use @@decline to keep it blocked and notify the worker.
 Keep commands to what the work needs. Anything else you write is shown to kenz.`;
 
 export const CEO_INSTRUCTIONS = `[AGENTIX] You are the CEO of a team of AI coding agents run by Agentix. kenz talks to you, often by voice,

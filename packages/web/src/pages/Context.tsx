@@ -1,5 +1,6 @@
 // The team's shared context: the brief, saved notes, folders to search, and a search box to see what agents get.
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, type ContextHit, type ContextInfo } from '../api.ts';
 import { useStore } from '../store.ts';
 
@@ -11,6 +12,7 @@ export function Context() {
   const setServerSettings = useStore(s => s.setServerSettings);
   const server = useStore(s => s.server);
   const lastEventId = useStore(s => s.lastEventId);
+  const navigate = useNavigate();
   const [info, setInfo] = useState<ContextInfo>();
   const [brief, setBrief] = useState('');
   const [note, setNote] = useState('');
@@ -28,16 +30,32 @@ export function Context() {
   useEffect(() => { const t = setTimeout(load, 400); return () => clearTimeout(t); }, [eventBucket]);
 
   useEffect(() => {
-    if (!q.trim()) { setHits(undefined); return; }
-    const t = setTimeout(() => api.searchContext(q).then(r => { setHits(r.hits); setSemantic(r.embeddingError); }).catch(e => setError(String(e.message ?? e))), 250);
-    return () => clearTimeout(t);
+    let active = true;
+    if (!q.trim()) { setHits(undefined); setSemantic(undefined); return () => { active = false; }; }
+    setHits(undefined);
+    setSemantic(undefined);
+    const t = setTimeout(() => api.searchContext(q).then(r => {
+      if (active) { setHits(r.hits); setSemantic(r.embeddingError); }
+    }).catch(e => { if (active) setError(String(e.message ?? e)); }), 250);
+    return () => { active = false; clearTimeout(t); };
   }, [q]);
 
   async function act(fn: () => Promise<unknown>, what?: string) {
     setError(''); setSaved('');
     try { await fn(); if (what) setSaved(what); await load(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
-  const saveFolders = (paths: string[]) => act(async () => setServerSettings(await api.saveSettings({ contextPaths: paths })), 'folders');
+  const saveFolders = async (paths: string[]) => {
+    setError(''); setSaved('');
+    try {
+      setServerSettings(await api.saveSettings({ contextPaths: paths }));
+      setSaved('folders');
+      await load();
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  };
   const who = (from: string) => from === 'user' ? 'you' : live[from]?.name ?? archived[from]?.name ?? from;
   // Notes written by an agent are marked, so kenz can tell his own notes from a worker's.
   const noteWho = (from: string) => from === 'user' ? 'you' : `${who(from)} (teammate)`;
@@ -100,7 +118,7 @@ export function Context() {
             <button className="btn small danger" onClick={() => saveFolders(info.contextPaths.filter(x => x !== p))}>Remove</button>
           </div>
         ))}
-        <form className="row" onSubmit={e => { e.preventDefault(); const f = folder.trim(); if (f) saveFolders([...info.contextPaths, f]).then(() => setFolder('')); }}>
+        <form className="row" onSubmit={e => { e.preventDefault(); const f = folder.trim(); if (f) saveFolders([...info.contextPaths, f]).then(ok => { if (ok) setFolder(''); }); }}>
           <input className="grow mono" value={folder} onChange={e => setFolder(e.target.value)} placeholder="/home/you/projects/app/docs" />
           <button className="btn" disabled={!folder.trim()}>Add folder</button>
         </form>
@@ -122,6 +140,7 @@ export function Context() {
             <div key={i} className={`hit hit-${h.source}`}>
               <div className="hit-meta"><span className="hit-src">{SOURCE_LABEL[h.source]}</span><span className="mono">{h.source === 'note' ? `note by ${noteWho(h.agentId ?? 'user')}` : h.source === 'output' ? who(h.agentId ?? '') : h.title}</span><span className="muted">score {h.score}</span></div>
               <div className="hit-text">{h.text}</div>
+              {h.source === 'output' && h.agentId && <button className="link-btn small" onClick={() => navigate(`/history?agent=${encodeURIComponent(h.agentId!)}&q=${encodeURIComponent(q.trim())}`)}>Open in History</button>}
             </div>
           ))}
         </div>

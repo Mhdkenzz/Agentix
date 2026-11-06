@@ -11,14 +11,24 @@ const MODE_LABEL: Record<CoordinatorMode, string> = { human: 'You coordinate', a
 export function CoordinatorModeSelect() {
   const server = useStore(s => s.server);
   const setServerSettings = useStore(s => s.setServerSettings);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
   const coordinator = useStore(s => Object.values(s.agents).find(a => a.role === 'coordinator'));
   if (!server) return null;
+  async function changeMode(mode: CoordinatorMode) {
+    setSaving(true); setError('');
+    try { setServerSettings(await api.saveSettings({ coordinatorMode: mode })); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setSaving(false); }
+  }
   return (
-    <label className="mode" title={coordinator ? `Coordinator agent: ${coordinator.name}` : 'No coordinator agent yet'}>
+    <label className="mode" title={error || (coordinator ? `Coordinator agent: ${coordinator.name}` : 'No coordinator agent yet')}>
       <span>Coordinator</span>
-      <select value={server.coordinatorMode} onChange={e => api.saveSettings({ coordinatorMode: e.target.value as CoordinatorMode }).then(setServerSettings)}>
+      <select value={server.coordinatorMode} disabled={saving} aria-busy={saving} onChange={e => changeMode(e.target.value as CoordinatorMode)}>
         {(Object.keys(MODE_LABEL) as CoordinatorMode[]).map(m => <option key={m} value={m}>{MODE_LABEL[m]}</option>)}
       </select>
+      {saving && <span className="muted small" role="status">Saving…</span>}
+      {error && <span className="c-err small" role="alert">Save failed</span>}
       {server.coordinatorMode !== 'human' && !coordinator && <span className="c-wait" title="Create an agent with the Coordinator role">no agent</span>}
     </label>
   );
@@ -48,7 +58,7 @@ export function TopBar() {
   return (
     <nav className="topbar">
       <div className="brand">Agentix</div>
-      <div className="links">
+      <div className="links" aria-label="Main navigation">
         {PAGES.map(([to, label]) => <NavLink key={to} to={to} end={to === '/'}>{label}</NavLink>)}
       </div>
       <div className="grow" />

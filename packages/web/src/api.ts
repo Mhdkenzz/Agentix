@@ -1,5 +1,5 @@
 // REST + SSE client for the Agentix server. In dev, Vite proxies /api to the server.
-import type { Agent, AgentEvent, ModelOption, Role, Task, TaskStatus, Usage } from '../../shared/src/types.ts';
+import type { Agent, AgentChat, AgentEvent, ModelOption, PermissionDecision, PermissionRequest, Role, Task, TaskStatus, Usage } from '../../shared/src/types.ts';
 
 export type { ModelOption };
 export interface ModelList { models: ModelOption[]; current?: string; error?: string }
@@ -57,7 +57,6 @@ export interface NewAgent {
   cwd?: string;
   prompt?: string;
   replace?: boolean;
-  worktree?: boolean;
   model?: string;
 }
 
@@ -70,17 +69,11 @@ export interface ServerSettings {
   sharedContext: boolean;
   contextPaths: string[];
   setupDone: boolean;
-  worktrees: boolean;
   retentionDays: number;
   embeddings: { provider: 'off' | 'ollama'; url: string; model: string };
 }
 
 export interface UsageTotal extends Usage { agentId: string; turns: number }
-export interface WorktreeStatus {
-  branch: string; repo: string; path: string; target: string;
-  files: { status: string; path: string }[]; commits: number; stat: string; diff: string; truncated: boolean;
-}
-
 export interface Note { id: string; ts: number; from: string; text: string }
 export interface ContextHit { source: 'note' | 'output' | 'file'; title: string; text: string; score: number; ts?: number; agentId?: string; path?: string }
 export interface SearchResult { hits: ContextHit[]; embeddingError?: string }
@@ -90,6 +83,7 @@ export interface ScanResult { scanner: 'python' | 'node'; platform: string; foun
 
 export const api = {
   settings: () => call<{ settings: ServerSettings }>('/api/settings').then(r => r.settings),
+  health: () => call<{ ok: boolean; store: 'sqlite' | 'json'; errors: string[] }>('/api/health'),
   saveSettings: (patch: Partial<ServerSettings>) => call<{ settings: ServerSettings }>('/api/settings', 'PUT', patch).then(r => r.settings),
   resetWorkspace: () => call<{ ok: boolean; settings: ServerSettings }>('/api/reset', 'POST'),
   askCoordinator: (text: string, about?: string) => call('/api/coordinator/ask', 'POST', { text, about }),
@@ -103,6 +97,7 @@ export const api = {
   remove: (id: string) => call(`/api/agents/${id}`, 'DELETE'),
   /** live and removed agents (removed ones have archivedAt) */
   allAgents: () => call<{ agents: Agent[]; historyDir: string }>('/api/agents?archived=1'),
+  chats: (id: string) => call<{ chats: AgentChat[] }>(`/api/agents/${id}/chats`).then(r => r.chats),
   /** fresh native session; clear also hides earlier events in the dashboard */
   newSession: (id: string, clear: boolean) => call(`/api/agents/${id}/session`, 'POST', { clear }),
   context: () => call<ContextInfo>('/api/context'),
@@ -112,14 +107,18 @@ export const api = {
   searchContext: (q: string) => call<SearchResult>(`/api/context/search?q=${encodeURIComponent(q)}&limit=20`),
   scan: () => call<ScanResult>('/api/setup/scan'),
   usage: () => call<{ total: UsageTotal[]; today: UsageTotal[] }>('/api/usage'),
+  searchEvents: (params: URLSearchParams) => call<{
+    events: AgentEvent[];
+    stats: { agentId: string; count: number; lastTs: number }[];
+  }>(`/api/events?${params.toString()}`),
   tasks: () => call<{ tasks: Task[] }>('/api/tasks').then(r => r.tasks),
   addTask: (t: { title: string; owner?: string; status?: TaskStatus }) => call<{ task: Task }>('/api/tasks', 'POST', t).then(r => r.task),
   editTask: (id: string, patch: { title?: string; status?: TaskStatus; owner?: string | null; note?: string }) =>
     call<{ task: Task }>(`/api/tasks/${id}`, 'PATCH', patch).then(r => r.task),
   deleteTask: (id: string) => call(`/api/tasks/${id}`, 'DELETE'),
-  worktree: (id: string) => call<WorktreeStatus>(`/api/agents/${id}/worktree`),
-  merge: (id: string) => call<{ merged: string; into: string }>(`/api/agents/${id}/worktree/merge`, 'POST'),
-  discard: (id: string) => call(`/api/agents/${id}/worktree/discard`, 'POST'),
+  approvals: () => call<{ approvals: PermissionRequest[] }>('/api/approvals').then(r => r.approvals),
+  decideApproval: (id: string, decision: PermissionDecision, note = '') =>
+    call<{ approval: PermissionRequest }>(`/api/approvals/${id}`, 'PATCH', { decision, note }).then(r => r.approval),
   testEmbeddings: () => call<{ ok: boolean; dimensions?: number; error?: string }>('/api/context/embeddings/test', 'POST'),
   steer: (id: string, text: string) => call(`/api/agents/${id}/steer`, 'POST', { text, from: 'user' }),
   interrupt: (id: string) => call(`/api/agents/${id}/interrupt`, 'POST'),
