@@ -441,3 +441,43 @@ being dropped, stranded or hidden.
 - Coordinator summaries query each agent's latest output directly instead of loading and filtering its
   last 50 mixed events; the JSON fallback scans backward and stops at the match.
 - Verification: typecheck, lint, production build and `git diff --check` pass.
+
+## Visual refinement pass (2026-11-06)
+
+- Refined the blue-charcoal theme with a softer ambient glow, richer layered panels, stronger selected
+  states, cleaner form focus, and more tactile hover/press feedback.
+- Added a small setup eyebrow and accent rule; setup steps now have distinct, restrained color washes.
+- Reviewed the setup layout at desktop and mobile widths. Typecheck, lint, production build and source
+  `git diff --check` pass.
+
+## Agent coordination handoff (2026-11-06)
+
+- Assigned workers now receive the current team board when their turn actually starts, including
+  task ownership, statuses, task notes and pending permission requests. This keeps queued tasks from
+  acting on stale coordination information and helps workers flag dependencies instead of duplicating
+  or taking over work.
+- Verification: typecheck, lint and `git diff --check` pass.
+
+## Server handoff audit (2026-11-06)
+
+- Permission-approved task resumes now include the original task title and saved task context in both
+  direct approvals and restart recovery, so the worker has the work scope on its fresh turn.
+- SSE replay now buffers live events until history is sent and skips already-sent event IDs, preventing
+  duplicate chat items when a new event lands during replay.
+- Verification: typecheck, lint and `git diff --check` pass.
+
+## JSON persistence audit (2026-11-06)
+
+- Migrating the JSON fallback now merges old embedded events with the append-only journal and writes
+  the new snapshot format, so a restart cannot replace newer events with a stale snapshot.
+- A crash-truncated final event line is separated before appending again; the damaged bytes stay on
+  disk for recovery, while later valid events remain readable.
+- Verification: typecheck, lint and `git diff --check` pass.
+
+## Shared-context cache audit (2026-11-06)
+
+- Semantic embeddings now keep at most 2,000 in-memory vectors and compact the on-disk cache after it
+  crosses 32 MiB. Older oversized caches are reset because embeddings can be rebuilt from source text.
+- Ollama responses are checked for consistent, finite vectors within a bounded dimension before caching;
+  incompatible cached vectors are skipped during scoring.
+- Verification: typecheck, lint and `git diff --check` pass.

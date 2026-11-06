@@ -49,6 +49,13 @@ function appendTaskNote(previous: string | undefined, latest: string): string {
   return earlier ? `${earlier}\n\n${recent}` : recent;
 }
 
+function approvedTaskPrompt(request: PermissionRequest, task?: Task): string {
+  const scope = task
+    ? `[TASK ${task.id}] ${task.title}${task.note ? `\n[Task feedback/context]\n${task.note.slice(0, 1_000)}` : ''}\n\n`
+    : '';
+  return `${scope}[APPROVAL ${request.id}] Approved: ${request.decision ?? ''}\nOriginal request: ${request.request}`;
+}
+
 /** Read an environment number at every use, so tests can change it while the server runs. */
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -508,7 +515,8 @@ export class SessionManager {
           this.emitTask(reopened, decidedBy, 'Task');
         }
       }
-      if (!this.startTurn(worker.id, `[APPROVAL ${id}] Approved: ${note}\nOriginal request: ${request.request}`, decidedBy, request.taskId)) {
+      const task = request.taskId ? getTask(request.taskId) : undefined;
+      if (!this.startTurn(worker.id, approvedTaskPrompt(request, task), decidedBy, request.taskId)) {
         throw new HttpError(429, 'approval saved but the worker queue is full; it will be retried when capacity is available');
       }
       markPermissionRequestApplied(id);
@@ -540,7 +548,7 @@ export class SessionManager {
         markPermissionRequestApplied(request.id);
         continue;
       }
-      if (this.startTurn(worker.id, `${marker} Approved: ${request.decision ?? ''}\nOriginal request: ${request.request}`, request.decidedBy ?? 'system', request.taskId)) {
+      if (this.startTurn(worker.id, approvedTaskPrompt(request, task), request.decidedBy ?? 'system', request.taskId)) {
         markPermissionRequestApplied(request.id);
         recovered++;
       }
@@ -745,6 +753,9 @@ export class SessionManager {
     if (agent.role === 'ceo') {
       const label = from === 'user' ? '[FROM KENZ]' : '';
       prompt = `[TEAM STATUS]\n${this.teamDigest(agentId)}\n\n${label ? label + '\n' : ''}${prompt}`;
+    }
+    if (agent.role === 'worker' && taskId) {
+      prompt = `[TEAM STATUS]\n${this.teamDigest(agentId)}\n\nUse the board to avoid duplicating work. If another task blocks yours or ownership is unclear, report that to the coordinator instead of silently taking over.\n\n${prompt}`;
     }
 
     const ctx = {
@@ -1552,19 +1563,23 @@ export class SessionManager {
     }
   }
 
-  /** One line per agent plus the start of its latest output. */
+  /** Compact shared view of work, blockers, pending approvals and the latest teammate output. */
   teamDigest(excludeId?: string): string {
     const agents = store.getAgents().filter(a => a.id !== excludeId);
     const open = listTasks().filter(t => t.status !== 'done');
     const names = new Map(store.getAllAgents().map(a => [a.id, a.name]));
     const tasks = open.length
-      ? `\nTasks (not done):\n${open.map(t => `- ${t.id} [${t.status}] ${t.title}${t.owner ? ` (${names.get(t.owner) ?? t.owner})` : ''}`).join('\n')}`
+      ? `\nTasks (not done${open.length > 20 ? `, showing 20 of ${open.length}` : ''}):\n${open.slice(0, 20).map(t => `- ${t.id} [${t.status}] ${t.title}${t.owner ? ` (${names.get(t.owner) ?? t.owner})` : ''}${t.note ? ` — ${oneLine(t.note, 140)}` : ''}`).join('\n')}`
       : '';
-    if (!agents.length) return `(no other agents)${tasks}`;
+    const pending = listPermissionRequests().filter(r => r.status === 'pending');
+    const approvals = pending.length
+      ? `\nPermission requests awaiting review${pending.length > 10 ? `, showing 10 of ${pending.length}` : ''}:\n${pending.slice(0, 10).map(r => `- ${r.id} from ${names.get(r.workerId) ?? r.workerId}${r.taskId ? ` on ${r.taskId}` : ''}: ${oneLine(r.request, 180)}`).join('\n')}`
+      : '';
+    if (!agents.length) return `(no other agents)${tasks}${approvals}`;
     return agents.map(a => {
       const last = store.getLatestAgentOutput(a.id);
       const out = last?.text ? `\n    last output: ${oneLine(last.text, 200)}` : '';
       return `- ${a.name} (${a.id}, ${a.kind}, ${a.role}): ${a.status} — ${a.activity}${out}`;
-    }).join('\n') + tasks;
+    }).join('\n') + tasks + approvals;
   }
 }

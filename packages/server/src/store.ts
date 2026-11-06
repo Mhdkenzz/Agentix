@@ -100,6 +100,16 @@ function readEventLines(path: string): AgentEvent[] {
   return out;
 }
 
+/** Keep a crash-truncated final append from merging with and corrupting the next event. */
+function repairEventTail(path: string): void {
+  let raw: Buffer;
+  try { raw = readFileSync(path); } catch { return; }
+  if (!raw.length || raw[raw.length - 1] === 0x0a) return;
+  // Leave the incomplete bytes for forensic recovery; the line reader skips them. The separator
+  // keeps the next valid append on its own line so a single crash cannot poison future events.
+  appendFileSync(path, '\n');
+}
+
 /** Write the whole events file (used when events are deleted, not appended). */
 function writeEventLines(path: string, events: AgentEvent[]): void {
   const temporary = `${path}.tmp`;
@@ -351,6 +361,7 @@ function openJson(home: string): IStore {
     else eventWriteError = detail;
     if (!alreadyFailing) console.error(`agentix: cannot write ${kind} in ${home}: ${detail}`);
   };
+  repairEventTail(eventsPath);
   if (existsSync(path)) {
     let data: any;
     try { data = JSON.parse(readFileSync(path, 'utf-8')); }
@@ -364,10 +375,17 @@ function openJson(home: string): IStore {
     agents = data.agents;
     nextEventId = Number.isSafeInteger(data.nextEventId) && data.nextEventId > 0 ? data.nextEventId : 1;
     if (Array.isArray(data.events)) {
-      // The old format kept the events in the same file: move them to the append-only one.
-      events = data.events;
-      nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, Number(e?.id) || 0), 0) + 1);
+      // Merge the old snapshot with the journal: a crash before the snapshot migration finished
+      // must never replace newer append-only events with the older embedded copy.
+      const merged = new Map<number, AgentEvent>();
+      for (const event of data.events as AgentEvent[]) merged.set(event.id, event);
+      for (const event of readEventLines(eventsPath)) merged.set(event.id, event);
+      events = [...merged.values()].sort((a, b) => a.id - b.id);
+      nextEventId = Math.max(nextEventId, events.reduce((m, e) => Math.max(m, e.id), 0) + 1);
       writeEventLines(eventsPath, events);
+      const temporary = `${path}.tmp`;
+      writeFileSync(temporary, JSON.stringify({ agents, nextEventId }));
+      renameSync(temporary, path);
     }
   }
   if (!events.length) {

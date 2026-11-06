@@ -7,7 +7,7 @@
 // notes, the output of every other agent and the text files in settings.contextPaths. The brief and the
 // best matches go in front of the prompt as a [SHARED CONTEXT] block, so agents build on each other's work.
 // With embeddings on (Settings: a local Ollama), the search also matches by meaning, not only by words.
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { join, extname, basename } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -387,22 +387,62 @@ export async function searchContext(query: string, opts: SearchOptions = {}): Pr
 const EMBED_BATCH = 32;
 const EMBED_NEW_PER_SEARCH = 96;   // bounds the first searches; the rest is embedded by later ones
 const EMBED_TIMEOUT_MS = 15_000;
+const MAX_EMBED_CACHE_ENTRIES = 2_000;
+const MAX_EMBED_CACHE_FILE_BYTES = 32 * 1024 * 1024;
 const embedFile = () => join(dir(), 'embeddings.jsonl');
 let embedCache: Map<string, number[]> | undefined;
 let embedModel = '';
 
 const hashText = (model: string, text: string) => createHash('sha1').update(model + '\0' + text).digest('hex');
 
+function putEmbedding(cache: Map<string, number[]>, key: string, vector: number[]): void {
+  cache.delete(key);
+  cache.set(key, vector);
+  while (cache.size > MAX_EMBED_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function compactEmbeddings(cache: Map<string, number[]>, model: string): void {
+  const path = embedFile();
+  const temp = `${path}.tmp`;
+  const lines = [...cache].map(([h, v]) => JSON.stringify({ m: model, h, v }));
+  writeFileSync(temp, lines.length ? `${lines.join('\n')}\n` : '');
+  renameSync(temp, path);
+}
+
 function loadEmbeddings(model: string): Map<string, number[]> {
   if (embedCache && embedModel === model) return embedCache;
   embedCache = new Map();
   embedModel = model;
+  const path = embedFile();
   try {
-    for (const line of readFileSync(embedFile(), 'utf8').split('\n')) {
-      if (!line) continue;
-      try { const r = JSON.parse(line); if (r.m === model) embedCache.set(r.h, r.v); } catch { /* torn line */ }
+    if (statSync(path).size > MAX_EMBED_CACHE_FILE_BYTES) {
+      // This file is only a cache. Rebuild recent vectors on demand instead of loading an
+      // unbounded cache left by older versions or a long-running installation.
+      writeFileSync(path, '');
+      return embedCache;
     }
-  } catch { /* none yet */ }
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return embedCache;
+    throw err;
+  }
+  try {
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r.m === model && typeof r.h === 'string' && Array.isArray(r.v)
+          && r.v.length > 0 && r.v.length <= 4096 && r.v.every((n: unknown) => typeof n === 'number' && Number.isFinite(n))) {
+          putEmbedding(embedCache, r.h, r.v);
+        }
+      } catch { /* torn line */ }
+    }
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
   return embedCache;
 }
 
@@ -415,7 +455,12 @@ export async function embed(texts: string[]): Promise<number[][]> {
   });
   if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json() as { embeddings?: number[][] };
-  if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length) throw new Error('Ollama returned no embeddings');
+  if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length
+    || !data.embeddings.length || !Array.isArray(data.embeddings[0]) || !data.embeddings[0].length || data.embeddings[0].length > 4096
+    || data.embeddings.some(v => !Array.isArray(v) || v.length !== data.embeddings![0].length
+      || v.some(n => typeof n !== 'number' || !Number.isFinite(n)))) {
+    throw new Error('Ollama returned invalid embeddings');
+  }
   return data.embeddings;
 }
 
@@ -447,9 +492,14 @@ export async function searchContextSmart(query: string, opts: SearchOptions = {}
       const batch = missing.slice(b, b + EMBED_BATCH);
       const vecs = await embed(batch.map(i => docs[i].text));
       mkdirSync(dir(), { recursive: true });
-      appendFileSync(embedFile(), batch.map((i, j) => { cache.set(keys[i], vecs[j]); return JSON.stringify({ m: settings.model, h: keys[i], v: vecs[j] }); }).join('\n') + '\n');
+      const records = batch.map((i, j) => {
+        putEmbedding(cache, keys[i], vecs[j]);
+        return JSON.stringify({ m: settings.model, h: keys[i], v: vecs[j] });
+      });
+      appendFileSync(embedFile(), records.join('\n') + '\n');
+      if (statSync(embedFile()).size > MAX_EMBED_CACHE_FILE_BYTES) compactEmbeddings(cache, settings.model);
     }
-    const semantic = docs.map((_, i) => { const v = cache.get(keys[i]); return v ? cosine(qv, v) : 0; });
+    const semantic = docs.map((_, i) => { const v = cache.get(keys[i]); return v && v.length === qv.length ? cosine(qv, v) : 0; });
     // reciprocal rank fusion (k = 60); a weak semantic match (< 0.35) doesn't count
     const rank = (scores: number[], min: number) => {
       const r = new Map<number, number>();

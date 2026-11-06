@@ -185,6 +185,9 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
 
   let closed = false;
   let unsubscribe = () => {};
+  let replaying = true;
+  let lastSentId = 0;
+  let buffered: AgentEvent[] = [];
   const keepalive = setInterval(() => {
     if (closed || res.write(': keepalive\n\n')) return;
     closed = true;
@@ -202,11 +205,21 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
   const send = (event: AgentEvent) => {
     if (!closed && !writeSSE(res, event)) closeStream();
   };
-  // Subscribe before replaying so no event can slip between the snapshot and live stream.
-  unsubscribe = bus.subscribe(e => { if (!agentId || e.agentId === agentId) send(e); });
-
   const resume = req.headers['last-event-id'] ?? url.searchParams.get('after');
   const after = resume != null ? Number(resume) || 0 : 0;
+  lastSentId = after;
+  const sendOnce = (event: AgentEvent) => {
+    if (event.id <= lastSentId) return;
+    send(event);
+    lastSentId = event.id;
+  };
+  // Subscribe before replaying, but hold live events until the replay is complete. Events created
+  // during the replay can also appear in its snapshot; sending them twice can duplicate chat items.
+  unsubscribe = bus.subscribe(e => {
+    if (agentId && e.agentId !== agentId) return;
+    if (replaying) buffered.push(e); else sendOnce(e);
+  });
+
   const asked = Number(url.searchParams.get('tail') ?? SSE_DEFAULT_REPLAY);
   // A replay is bounded: a client cannot ask for the whole database in one go.
   const max = sseMaxReplay();
@@ -214,10 +227,10 @@ function serveSSE(req: IncomingMessage, res: ServerResponse, url: URL, bus: Even
     ? max
     : Math.min(Math.max(Number.isFinite(asked) ? asked : SSE_DEFAULT_REPLAY, 0), max);
   const history = agentId ? store.getAgentEvents(agentId, after, limit) : store.getEvents(after, limit);
-  for (const e of history) {
-    if (closed) break;
-    send(e);
-  }
+  for (const e of history) { if (closed) break; sendOnce(e); }
+  replaying = false;
+  buffered.sort((a, b) => a.id - b.id).forEach(sendOnce);
+  buffered = [];
 
   res.on('close', closeStream);
   req.on('aborted', closeStream);
